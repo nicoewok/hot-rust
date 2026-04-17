@@ -105,25 +105,32 @@ impl HotApp {
         let is_highlighted = self.highlighted_nodes.contains(&id);
 
         // 1. Scale base node dimensions
-        let node_width = 100.0 * zoom;
-        let node_height = 40.0 * zoom;
+        let node_width = 110.0 * zoom;
+        let node_height = 45.0 * zoom;
         let v_spacing = 100.0 * zoom;
-        let padding = 20.0 * zoom;
+        let padding = 25.0 * zoom;
 
         let rect = egui::Rect::from_center_size(pos, egui::vec2(node_width, node_height));
 
+        // Modern Premium Colors
         let fill_color = if is_highlighted {
-            egui::Color32::from_rgb(255, 230, 100)
+            egui::Color32::from_rgb(255, 215, 0) // Gold for highlight
         } else {
-            egui::Color32::from_rgb(240, 240, 255)
+            egui::Color32::from_rgb(45, 45, 60) // Dark sleek slate
+        };
+        
+        let stroke_color = if is_highlighted {
+            egui::Color32::from_rgb(255, 255, 255)
+        } else {
+            egui::Color32::from_rgb(100, 100, 120)
         };
 
         // 2. Scale strokes and corner radii
-        painter.rect_filled(rect, 4.0 * zoom, fill_color);
+        painter.rect_filled(rect, 8.0 * zoom, fill_color);
         painter.rect_stroke(
             rect,
-            4.0 * zoom,
-            egui::Stroke::new(1.0 * zoom, egui::Color32::DARK_GRAY),
+            8.0 * zoom,
+            egui::Stroke::new(1.5 * zoom, stroke_color),
         );
 
         // 3. Scale text
@@ -132,11 +139,11 @@ impl HotApp {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(14.0 * zoom),
-            egui::Color32::BLACK,
+            egui::FontId::proportional(15.0 * zoom),
+            egui::Color32::WHITE,
         );
 
-        // 4. Scale subtree widths (assuming get_subtree_width returns base unzoomed widths)
+        // 4. Scale subtree widths
         let total_width = self.get_subtree_width(node) * zoom;
         let mut current_x = pos.x - total_width / 2.0;
 
@@ -149,41 +156,38 @@ impl HotApp {
             let child_center_x = current_x + entry_width / 2.0;
             let child_pos = egui::pos2(child_center_x, pos.y + v_spacing);
 
-            // 5. Scale line offsets and stroke
+            // 5. Scale line segments
             painter.line_segment(
                 [
                     pos + egui::vec2(0.0, node_height / 2.0),
-                    child_pos - egui::vec2(0.0, 20.0 * zoom),
+                    child_pos - egui::vec2(0.0, 25.0 * zoom),
                 ],
-                egui::Stroke::new(1.0 * zoom, egui::Color32::GRAY),
+                egui::Stroke::new(1.5 * zoom, egui::Color32::from_rgb(180, 180, 200)),
             );
 
             match entry {
                 Entry::Leaf(k, _) => {
-                    // Scale leaf circle and text
                     painter.circle_filled(
                         child_pos,
-                        5.0 * zoom,
-                        egui::Color32::from_rgb(100, 200, 100),
+                        6.0 * zoom,
+                        egui::Color32::from_rgb(0, 200, 150), // Emerald green
                     );
                     painter.text(
-                        child_pos + egui::vec2(0.0, 10.0 * zoom),
+                        child_pos + egui::vec2(0.0, 15.0 * zoom),
                         egui::Align2::CENTER_TOP,
                         format!("'{}'", k),
-                        egui::FontId::proportional(12.0 * zoom),
-                        egui::Color32::BLACK,
+                        egui::FontId::proportional(13.0 * zoom),
+                        egui::Color32::from_rgb(220, 220, 240),
                     );
                 }
                 Entry::Child(rep, child) => {
-                    // Scale representative key text on the edge
                     painter.text(
-                        (pos + child_pos.to_vec2()) / 2.0,
+                        (pos + child_pos.to_vec2()) / 2.0 + egui::vec2(5.0 * zoom, -5.0 * zoom),
                         egui::Align2::LEFT_CENTER,
                         format!("rep: {}", rep),
-                        egui::FontId::proportional(10.0 * zoom),
-                        egui::Color32::DARK_GRAY,
+                        egui::FontId::proportional(11.0 * zoom),
+                        egui::Color32::from_rgb(150, 150, 170),
                     );
-                    // Recurse with the same zoom level
                     self.draw_node_recursive(painter, child, child_pos, zoom);
                 }
             }
@@ -191,66 +195,113 @@ impl HotApp {
             current_x += entry_width + padding;
         }
     }
+
 }
 
 impl eframe::App for HotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- Side Panel (Controls) ---
-        egui::SidePanel::left("control_panel").show(ctx, |ui| {
-            ui.heading("HOT Control");
-            ui.add_space(10.0);
+        // --- Side Panel (Modernized Taskbar) ---
+        egui::SidePanel::left("control_panel")
+            .resizable(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading(egui::RichText::new("HOT Engine").size(24.0).strong());
+                    ui.label(egui::RichText::new("Interactive Visualizer").italics().color(egui::Color32::GRAY));
+                });
+                
+                ui.add_space(30.0);
+                ui.separator();
+                ui.add_space(20.0);
 
-            ui.label("Key:");
-            ui.text_edit_singleline(&mut self.new_key);
+                let group_frame = egui::Frame::none()
+                    .fill(egui::Color32::from_gray(35))
+                    .rounding(10.0)
+                    .inner_margin(12.0)
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
 
-            ui.add_space(5.0);
-            ui.horizontal(|ui| {
-                if ui.button("Insert").clicked() {
-                    self.trie.insert(self.new_key.clone(), format!("val_{}", self.new_key));
-                }
+                group_frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(egui::RichText::new("ENTRY MANAGEMENT").small().strong().color(egui::Color32::from_rgb(120, 120, 255)));
+                    ui.add_space(10.0);
 
-                if ui.button("Search").clicked() {
-                    if let Some(val) = self.trie.lookup(&self.new_key) {
-                        self.last_op_message = format!("Found: {}", val);
-                    } else {
-                        self.last_op_message = format!("Not found: {}", self.new_key);
+                    ui.label("Target Key:");
+                    let _text_edit = ui.add_sized(
+                        [ui.available_width(), 32.0],
+                        egui::TextEdit::singleline(&mut self.new_key)
+                            .hint_text("Enter key...")
+                    );
+
+                    ui.add_space(15.0);
+
+                    let button_size = egui::vec2(ui.available_width() / 2.1, 42.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("➕ Insert").size(16.0)).rounding(6.0)).clicked() {
+                            let old_heights = self.capture_heights();
+                            self.trie.insert(self.new_key.clone(), format!("val_{}", self.new_key));
+                            self.update_highlights(old_heights);
+                        }
+
+                        if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("🔍 Search").size(16.0)).rounding(6.0)).clicked() {
+                            if let Some(val) = self.trie.lookup(&self.new_key) {
+                                self.last_op_message = format!("Found: {}", val);
+                            } else {
+                                self.last_op_message = format!("Not found: {}", self.new_key);
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(15.0);
+
+                group_frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(egui::RichText::new("BATCH OPERATIONS").small().strong().color(egui::Color32::from_rgb(255, 120, 120)));
+                    ui.add_space(10.0);
+
+                    if ui.add_sized(
+                        [ui.available_width(), 48.0],
+                        egui::Button::new(egui::RichText::new("🚀 Fill Node (31 Keys)").size(16.0)).rounding(6.0)
+                    ).clicked() {
+                        let old_heights = self.capture_heights();
+                        for _ in 0..31 {
+                            let key = format!("batch_{}", self.batch_counter);
+                            self.trie.insert(key.clone(), format!("val_{}", key));
+                            self.batch_counter += 1;
+                        }
+                        self.update_highlights(old_heights);
+                        self.last_op_message = "Batch insertion complete.".to_string();
                     }
-                }
+                });
+
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(20.0);
+
+                ui.label(egui::RichText::new("VIEWPORT").small().strong());
+                ui.add_space(10.0);
+                
+                ui.horizontal(|ui| {
+                    ui.label(format!("Zoom: {:.2}x", self.zoom));
+                    if ui.button("⟲ Reset").clicked() {
+                        self.zoom = 1.0;
+                        self.pan = egui::Vec2::ZERO;
+                    }
+                });
+
+                
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("🖱 Scroll to Zoom").small().color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new("🖱 Drag to Pan").small().color(egui::Color32::GRAY));
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.add_space(20.0);
+                    ui.label(egui::RichText::new(format!("Status: {}", self.last_op_message)).italics());
+                    ui.separator();
+                });
             });
 
-            ui.add_space(10.0);
-            
-            // --- NEW: Batch Insert Button ---
-            // HOT nodes have a max fanout k=32. 
-            // 31 inserts fill the node to k-1[cite: 162].
-            if ui.button("🚀 Fill Node (31 Unique Keys)").clicked() {
-                for _ in 0..31 {
-                    let key = format!("batch_{}", self.batch_counter);
-                    self.trie.insert(key.clone(), format!("val_{}", key));
-                    self.batch_counter += 1;
-                }
-                self.last_op_message = "Inserted 31 keys. Node is now at capacity!".to_string();
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            
-            // --- NEW: Zoom Controls ---
-            ui.label("View Controls:");
-            ui.horizontal(|ui| {
-                ui.label(format!("Zoom: {:.1}x", self.zoom));
-                if ui.button("Reset").clicked() {
-                    self.zoom = 1.0;
-                    self.pan = egui::Vec2::ZERO;
-                }
-            });
-            ui.small("Use Ctrl + Mouse Wheel to Zoom");
-            ui.small("Click and Drag to Pan");
-
-            ui.add_space(20.0);
-            ui.separator();
-            ui.label(format!("Status: {}", self.last_op_message));
-        });
 
         // --- Central Panel (Visualizer) ---
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -263,28 +314,29 @@ impl eframe::App for HotApp {
                 self.pan += response.drag_delta();
             }
 
-            // Zoom logic (Ctrl + Scroll)
+            // Zoom logic (Scroll Wheel Only - No Ctrl needed)
             let scroll_delta = ctx.input(|i| i.smooth_scroll_delta.y);
-            if ctx.input(|i| i.modifiers.ctrl) && scroll_delta != 0.0 {
-                let zoom_delta = (scroll_delta / 200.0).exp();
+            if scroll_delta != 0.0 {
+                let zoom_delta = (scroll_delta / 400.0).exp(); // Reduced sensitivity for smoother wheel zoom
                 self.zoom *= zoom_delta;
-                self.zoom = self.zoom.clamp(0.1, 5.0); // Keep it sane
+                self.zoom = self.zoom.clamp(0.05, 10.0); // Expanded range
             }
 
-            // 2. Render the Tree
+            // 2. Render the Tree - Ensure clipping to the CentralPanel
             if let Some(root) = &self.trie.root {
-                let painter = ui.painter();
+                // Get a painter clipped to this UI's rect
+                let painter = ui.painter().with_clip_rect(rect);
                 
                 // Calculate centered starting position with Pan and Zoom
                 let center_x = rect.center().x + self.pan.x;
-                let start_y = rect.top() + 60.0 + self.pan.y;
+                let start_y = rect.top() + 80.0 + self.pan.y;
                 let start_pos = egui::pos2(center_x, start_y);
 
-                // Pass the current zoom to your drawing function
-                self.draw_node_recursive(painter, root, start_pos, self.zoom);
+                // Draw tree
+                self.draw_node_recursive(&painter, root, start_pos, self.zoom);
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Trie is empty. Insert a key to begin.");
+                    ui.label(egui::RichText::new("Trie is empty. Insert a key to begin.").size(18.0).color(egui::Color32::GRAY));
                 });
             }
         });

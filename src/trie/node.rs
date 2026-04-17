@@ -236,6 +236,7 @@ impl<K, V> HOTNode<K, V> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn to_dot_internal(&self, dot: &mut String)
     where
         K: std::fmt::Debug,

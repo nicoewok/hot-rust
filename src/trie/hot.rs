@@ -16,6 +16,7 @@ pub enum OverflowResult<K, V> {
 
 /// A wrapper for the Height Optimized Trie to manage the root and height increases.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HOT<K, V> {
     pub root: Option<HOTNode<K, V>>,
 }
@@ -56,6 +57,7 @@ where
     }
 
     /// Generates a Graphviz DOT representation of the trie.
+    #[allow(dead_code)]
     pub fn to_dot(&self) -> String
     where
         K: std::fmt::Debug,

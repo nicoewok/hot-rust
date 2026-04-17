@@ -12,6 +12,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "HOT (Height Optimized Trie) Live Viewer",
         options,
-        Box::new(|_cc| Box::<HotApp>::default()),
+        Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            Box::<HotApp>::default()
+        }),
     )
 }
