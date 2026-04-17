@@ -1,5 +1,5 @@
-use crate::entry::Entry;
-use crate::{MAX_FANOUT, OverflowResult};
+use crate::trie::Entry;
+use crate::trie::{MAX_FANOUT, OverflowResult};
 
 /// A node in the Height Optimized Trie.
 #[derive(Debug, Clone)]

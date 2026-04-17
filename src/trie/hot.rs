@@ -1,10 +1,6 @@
 //! Height Optimized Trie (HOT) implementation in Rust.
 
-pub mod entry;
-pub mod node;
-
-pub use entry::Entry;
-pub use node::HOTNode;
+use crate::trie::{Entry, HOTNode};
 
 /// The maximum fanout for a HOT node.
 pub const MAX_FANOUT: usize = 32;
@@ -72,6 +68,3 @@ where
         dot
     }
 }
-
-#[cfg(test)]
-mod tests;

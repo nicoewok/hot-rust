@@ -1,4 +1,4 @@
-use crate::node::HOTNode;
+use crate::trie::HOTNode;
 
 /// An entry in a HOT node, which can be either a leaf containing a key-value pair
 /// or a child pointing to another HOT node.
