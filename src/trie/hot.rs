@@ -52,8 +52,32 @@ where
     }
 
     /// Looks up a key in the trie.
+    #[allow(dead_code)]
     pub fn lookup(&self, key: &K) -> Option<&V> {
         self.root.as_ref()?.lookup(key)
+    }
+
+    /// Looks up a key and returns the path of nodes visited.
+    pub fn lookup_with_path(&self, key: &K) -> (Option<&V>, Vec<usize>) {
+        let mut path = Vec::new();
+        let val = if let Some(root) = &self.root {
+            root.lookup_with_path(key, &mut path)
+        } else {
+            None
+        };
+        (val, path)
+    }
+
+    /// Removes a node by its ID.
+    pub fn remove_by_id(&mut self, target_id: usize) -> bool {
+        if let Some(root) = &mut self.root {
+            if (root as *const _ as usize) == target_id {
+                self.root = None;
+                return true;
+            }
+            return root.remove_by_id(target_id);
+        }
+        false
     }
 
     /// Generates a Graphviz DOT representation of the trie.

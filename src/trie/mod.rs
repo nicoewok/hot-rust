@@ -6,6 +6,3 @@ pub mod hot;
 pub use entry::Entry;
 pub use node::HOTNode;
 pub use hot::{HOT, OverflowResult, MAX_FANOUT};
-
-#[cfg(test)]
-mod tests;

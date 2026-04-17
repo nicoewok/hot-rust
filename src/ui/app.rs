@@ -73,7 +73,7 @@ impl HotApp {
         }
     }
 
-    fn get_subtree_width(&self, node: &HOTNode<String, String>) -> f32 {
+    fn get_subtree_width(node: &HOTNode<String, String>) -> f32 {
         if node.entries.is_empty() {
             return 100.0;
         }
@@ -82,7 +82,7 @@ impl HotApp {
         for entry in &node.entries {
             match entry {
                 Entry::Child(_, child) => {
-                    total_width += self.get_subtree_width(child);
+                    total_width += Self::get_subtree_width(child);
                 }
                 Entry::Leaf(_, _) => {
                     total_width += 80.0; // Fixed width for leaf rendering
@@ -95,26 +95,35 @@ impl HotApp {
     }
 
     fn draw_node_recursive(
-        &self,
-        painter: &egui::Painter,
+        highlighted_nodes: &mut HashSet<usize>,
+        last_op_message: &mut String,
+        ui: &mut egui::Ui,
         node: &HOTNode<String, String>,
         pos: egui::Pos2,
         zoom: f32,
     ) {
         let id = node as *const _ as usize;
-        let is_highlighted = self.highlighted_nodes.contains(&id);
+        let is_highlighted = highlighted_nodes.contains(&id);
 
-        // 1. Scale base node dimensions
-        let node_width = 110.0 * zoom;
-        let node_height = 45.0 * zoom;
-        let v_spacing = 100.0 * zoom;
-        let padding = 25.0 * zoom;
+        // 1. Scale base node dimensions - INCREASED AS REQUESTED
+        let node_width = 140.0 * zoom;
+        let node_height = 60.0 * zoom;
+        let v_spacing = 180.0 * zoom; // SIGNIFICANTLY INCREASED SPACING
+        let padding = 35.0 * zoom;
 
         let rect = egui::Rect::from_center_size(pos, egui::vec2(node_width, node_height));
 
+        // INTERACTION: Click to highlight
+        let response = ui.interact(rect, ui.id().with(id), egui::Sense::click());
+        if response.clicked() {
+            highlighted_nodes.clear();
+            highlighted_nodes.insert(id);
+            *last_op_message = format!("Node selected: 0x{:x}", id);
+        }
+
         // Modern Premium Colors
         let fill_color = if is_highlighted {
-            egui::Color32::from_rgb(255, 215, 0) // Gold for highlight
+            egui::Color32::from_rgb(255, 165, 0) // Orange-Gold for highlight
         } else {
             egui::Color32::from_rgb(45, 45, 60) // Dark sleek slate
         };
@@ -126,69 +135,88 @@ impl HotApp {
         };
 
         // 2. Scale strokes and corner radii
-        painter.rect_filled(rect, 8.0 * zoom, fill_color);
-        painter.rect_stroke(
+        ui.painter().rect_filled(rect, 8.0 * zoom, fill_color);
+        ui.painter().rect_stroke(
             rect,
             8.0 * zoom,
-            egui::Stroke::new(1.5 * zoom, stroke_color),
+            egui::Stroke::new(if is_highlighted { 3.0 * zoom } else { 2.0 * zoom }, stroke_color),
         );
 
         // 3. Scale text
-        let label = format!("H: {}", node.height);
-        painter.text(
+        let label = format!("Height: {}", node.height);
+        ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(15.0 * zoom),
+            egui::FontId::proportional(18.0 * zoom),
             egui::Color32::WHITE,
         );
 
         // 4. Scale subtree widths
-        let total_width = self.get_subtree_width(node) * zoom;
+        let total_width = Self::get_subtree_width(node) * zoom;
         let mut current_x = pos.x - total_width / 2.0;
 
         for entry in &node.entries {
             let entry_width = match entry {
-                Entry::Child(_, child) => self.get_subtree_width(child) * zoom,
+                Entry::Child(_, child) => Self::get_subtree_width(child) * zoom,
                 Entry::Leaf(_, _) => 80.0 * zoom,
             };
 
             let child_center_x = current_x + entry_width / 2.0;
             let child_pos = egui::pos2(child_center_x, pos.y + v_spacing);
 
-            // 5. Scale line segments
-            painter.line_segment(
+            // 5. Scale line segments - ENHANCED VISIBILITY
+            ui.painter().line_segment(
                 [
                     pos + egui::vec2(0.0, node_height / 2.0),
-                    child_pos - egui::vec2(0.0, 25.0 * zoom),
+                    child_pos - egui::vec2(0.0, 30.0 * zoom),
                 ],
-                egui::Stroke::new(1.5 * zoom, egui::Color32::from_rgb(180, 180, 200)),
+                egui::Stroke::new(2.0 * zoom, egui::Color32::from_rgb(120, 120, 160)),
             );
 
             match entry {
                 Entry::Leaf(k, _) => {
-                    painter.circle_filled(
+                    let leaf_id = k as *const _ as usize;
+                    let is_leaf_highlighted = highlighted_nodes.contains(&leaf_id);
+                    
+                    let leaf_rect = egui::Rect::from_center_size(child_pos, egui::vec2(20.0 * zoom, 20.0 * zoom));
+                    let leaf_response = ui.interact(leaf_rect, ui.id().with(leaf_id), egui::Sense::click());
+                    
+                    if leaf_response.clicked() {
+                        highlighted_nodes.clear();
+                        highlighted_nodes.insert(leaf_id);
+                        *last_op_message = format!("Leaf selected: '{}' (0x{:x})", k, leaf_id);
+                    }
+
+                    ui.painter().circle_filled(
                         child_pos,
-                        6.0 * zoom,
-                        egui::Color32::from_rgb(0, 200, 150), // Emerald green
+                        8.0 * zoom,
+                        if is_leaf_highlighted { egui::Color32::from_rgb(255, 165, 0) } else { egui::Color32::from_rgb(0, 200, 150) },
                     );
-                    painter.text(
-                        child_pos + egui::vec2(0.0, 15.0 * zoom),
+                    
+                    if is_leaf_highlighted {
+                        ui.painter().circle_stroke(child_pos, 10.0 * zoom, egui::Stroke::new(2.5 * zoom, egui::Color32::WHITE));
+                    }
+
+                    ui.painter().text(
+                        child_pos + egui::vec2(0.0, 20.0 * zoom),
                         egui::Align2::CENTER_TOP,
                         format!("'{}'", k),
-                        egui::FontId::proportional(13.0 * zoom),
-                        egui::Color32::from_rgb(220, 220, 240),
+                        egui::FontId::proportional(14.0 * zoom),
+                        if is_leaf_highlighted { egui::Color32::WHITE } else { egui::Color32::from_rgb(220, 220, 240) },
                     );
                 }
                 Entry::Child(rep, child) => {
-                    painter.text(
-                        (pos + child_pos.to_vec2()) / 2.0 + egui::vec2(5.0 * zoom, -5.0 * zoom),
+                    // Division reason label (prominent)
+                    let text_pos = (pos + child_pos.to_vec2()) / 2.0 + egui::vec2(8.0 * zoom, -10.0 * zoom);
+                    ui.painter().text(
+                        text_pos,
                         egui::Align2::LEFT_CENTER,
                         format!("rep: {}", rep),
-                        egui::FontId::proportional(11.0 * zoom),
-                        egui::Color32::from_rgb(150, 150, 170),
+                        egui::FontId::proportional(13.0 * zoom),
+                        egui::Color32::from_rgb(180, 180, 255),
                     );
-                    self.draw_node_recursive(painter, child, child_pos, zoom);
+                    Self::draw_node_recursive(highlighted_nodes, last_op_message, ui, child, child_pos, zoom);
                 }
             }
 
@@ -200,15 +228,21 @@ impl HotApp {
 
 impl eframe::App for HotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- Side Panel (Modernized Taskbar) ---
+        // --- Side Panel (Modernized Sidebar) ---
+        // This panel is fixed and opaque, completely separate from the graph canvas.
         egui::SidePanel::left("control_panel")
             .resizable(false)
-            .default_width(280.0)
+            .default_width(320.0)
+            .frame(egui::Frame::none()
+                .fill(egui::Color32::from_rgb(32, 33, 36)) // Pure solid background (No transparency)
+                .inner_margin(egui::Margin::symmetric(20.0, 15.0))
+                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 80, 100))) // Strong visual boundary
+            )
             .show(ctx, |ui| {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
-                    ui.heading(egui::RichText::new("HOT Engine").size(24.0).strong());
-                    ui.label(egui::RichText::new("Interactive Visualizer").italics().color(egui::Color32::GRAY));
+                    ui.heading(egui::RichText::new("HOT Engine").size(24.0).strong().color(egui::Color32::WHITE));
+                    ui.label(egui::RichText::new("Interactive Visualizer").italics().color(egui::Color32::from_rgb(180, 180, 200)));
                 });
                 
                 ui.add_space(30.0);
@@ -244,13 +278,44 @@ impl eframe::App for HotApp {
                         }
 
                         if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("🔍 Search").size(16.0)).rounding(6.0)).clicked() {
-                            if let Some(val) = self.trie.lookup(&self.new_key) {
+                            let (val, path) = self.trie.lookup_with_path(&self.new_key);
+                            self.highlighted_nodes.clear();
+                            for node_id in path {
+                                self.highlighted_nodes.insert(node_id);
+                            }
+                            
+                            if let Some(val) = val {
                                 self.last_op_message = format!("Found: {}", val);
                             } else {
                                 self.last_op_message = format!("Not found: {}", self.new_key);
                             }
                         }
                     });
+
+                    ui.add_space(10.0);
+                    
+                    if !self.highlighted_nodes.is_empty() {
+                        if ui.add_sized(
+                            [ui.available_width(), 36.0],
+                            egui::Button::new(egui::RichText::new("🗑 Delete Highlighted").size(14.0))
+                                .fill(egui::Color32::from_rgb(150, 50, 50))
+                                .rounding(6.0)
+                        ).clicked() {
+                            let to_delete: Vec<usize> = self.highlighted_nodes.iter().cloned().collect();
+                            let mut deleted_any = false;
+                            for id in to_delete {
+                                if self.trie.remove_by_id(id) {
+                                    deleted_any = true;
+                                }
+                            }
+                            if deleted_any {
+                                self.highlighted_nodes.clear();
+                                self.last_op_message = "Subtree(s) deleted.".to_string();
+                            } else {
+                                self.last_op_message = "Could not delete node.".to_string();
+                            }
+                        }
+                    }
                 });
 
                 ui.add_space(15.0);
@@ -303,11 +368,17 @@ impl eframe::App for HotApp {
             });
 
 
-        // --- Central Panel (Visualizer) ---
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // 1. Handle Input for Zoom and Pan
-            let rect = ui.max_rect();
-            let response = ui.interact(rect, ui.id(), egui::Sense::click_and_drag());
+        // --- Central Panel (Graph Canvas) ---
+        // This area is reserved strictly for the trie visualization.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(15, 15, 20))) // Opaque canvas background
+            .show(ctx, |ui| {
+                // CLIP: Ensure no graph elements bleed outside this central area
+                let canvas_rect = ui.max_rect();
+                ui.set_clip_rect(canvas_rect);
+
+            // 1. Handle Input for Zoom and Pan (Only within the canvas area)
+            let response = ui.interact(canvas_rect, ui.id(), egui::Sense::click_and_drag());
 
             // Pan logic
             if response.dragged() {
@@ -324,16 +395,20 @@ impl eframe::App for HotApp {
 
             // 2. Render the Tree - Ensure clipping to the CentralPanel
             if let Some(root) = &self.trie.root {
-                // Get a painter clipped to this UI's rect
-                let painter = ui.painter().with_clip_rect(rect);
-                
                 // Calculate centered starting position with Pan and Zoom
-                let center_x = rect.center().x + self.pan.x;
-                let start_y = rect.top() + 80.0 + self.pan.y;
+                let center_x = canvas_rect.center().x + self.pan.x;
+                let start_y = canvas_rect.top() + 80.0 + self.pan.y;
                 let start_pos = egui::pos2(center_x, start_y);
 
                 // Draw tree
-                self.draw_node_recursive(&painter, root, start_pos, self.zoom);
+                Self::draw_node_recursive(
+                    &mut self.highlighted_nodes,
+                    &mut self.last_op_message,
+                    ui,
+                    root,
+                    start_pos,
+                    self.zoom,
+                );
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new("Trie is empty. Insert a key to begin.").size(18.0).color(egui::Color32::GRAY));

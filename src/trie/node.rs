@@ -20,7 +20,16 @@ impl<K, V> HOTNode<K, V> {
     }
 
     /// Performs a lookup for the given key in the HOT subtree.
+    #[allow(dead_code)]
     pub fn lookup(&self, key: &K) -> Option<&V>
+    where
+        K: Ord,
+    {
+        self.lookup_recursive(key)
+    }
+
+    #[allow(dead_code)]
+    fn lookup_recursive(&self, key: &K) -> Option<&V>
     where
         K: Ord,
     {
@@ -47,8 +56,72 @@ impl<K, V> HOTNode<K, V> {
                     None
                 }
             }
-            Entry::Child(_, node) => node.lookup(key),
+            Entry::Child(_, node) => node.lookup_recursive(key),
         }
+    }
+
+    /// Performs a lookup and returns the path of nodes visited.
+    pub fn lookup_with_path(&self, key: &K, path: &mut Vec<usize>) -> Option<&V>
+    where
+        K: Ord,
+    {
+        path.push(self as *const _ as usize);
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        let idx = match self.entries.binary_search_by(|e| e.key().cmp(key)) {
+            Ok(found_idx) => found_idx,
+            Err(insert_idx) => {
+                if insert_idx > 0 {
+                    insert_idx - 1
+                } else {
+                    return None;
+                }
+            }
+        };
+
+        match &self.entries[idx] {
+            Entry::Leaf(k, v) => {
+                if k == key {
+                    path.push(k as *const _ as usize);
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            Entry::Child(_, node) => node.lookup_with_path(key, path),
+        }
+    }
+
+    /// Removes a node or leaf from the trie if its memory address matches target_id.
+    pub fn remove_by_id(&mut self, target_id: usize) -> bool {
+        let mut to_remove = None;
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            match entry {
+                Entry::Child(_, node) => {
+                    if (node.as_ref() as *const _ as usize) == target_id {
+                        to_remove = Some(i);
+                        break;
+                    }
+                    if node.remove_by_id(target_id) {
+                        return true;
+                    }
+                }
+                Entry::Leaf(k, _) => {
+                    if (k as *const _ as usize) == target_id {
+                        to_remove = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(idx) = to_remove {
+            self.entries.remove(idx);
+            return true;
+        }
+        false
     }
 
     /// Inserts a key-value pair into the HOT subtree.

@@ -1,7 +1,4 @@
-mod trie;
-mod ui;
-
-use ui::HotApp;
+use hot_rust::ui::HotApp;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
