@@ -1,26 +1,16 @@
-//! Height Optimized Trie (HOT) implementation in Rust.
-
 use crate::trie::{Entry, HOTNode};
 
-/// The result of an insertion operation, which may result in a node split or a new minimum key.
 #[derive(Debug, Clone)]
 pub enum InsertResult<K, V> {
-    /// Insertion succeeded without overflowing the current node.
     Ok,
-    /// The smallest key in the subtree has changed.
     NewMin(K),
-    /// The node overflowed and was split into two new entries.
     Split(Entry<K, V>, Entry<K, V>),
 }
 
-/// The result of a removal operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoveResult {
-    /// The target was not found.
     NotFound,
-    /// The target was removed, and the node still has entries.
     Removed,
-    /// The target was removed, and the node is now empty.
     Empty,
 }
 
@@ -34,7 +24,7 @@ pub struct HOT<K, V> {
 
 impl<K, V> HOT<K, V>
 where
-    K: Ord + Clone,
+    K: Ord + Clone + crate::trie::node::HotKey,
     V: Clone,
 {
     /// Creates a new empty HOT with specified fanout.
@@ -52,6 +42,7 @@ where
                     let mut new_root = HOTNode::new(root.height + 1, self.fanout);
                     new_root.entries.push(e1);
                     new_root.entries.push(e2);
+                    new_root.update_mask_from_entries();
                     self.root = Some(new_root);
                 }
             }

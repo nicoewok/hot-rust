@@ -1,5 +1,6 @@
 use eframe::egui;
 use crate::trie::{Entry, HOTNode, HOT};
+use crate::trie::node::HotKey;
 use std::collections::{HashMap, HashSet};
 
 
@@ -14,6 +15,7 @@ pub struct HotApp {
     batch_counter: usize, // To ensure unique batch keys
     fanout: usize,
     inserted_data: HashMap<String, String>,
+    hovered_node: Option<u64>,
 }
 
 impl Default for HotApp {
@@ -28,6 +30,7 @@ impl Default for HotApp {
             batch_counter: 0,
             fanout: 32,
             inserted_data: HashMap::new(),
+            hovered_node: None,
         }
     }
 }
@@ -49,7 +52,7 @@ impl HotApp {
         let id = node.id;
         map.insert(id, node.height);
         for entry in &node.entries {
-            if let Entry::Child(_, child) = entry {
+            if let Entry::Child(_, child, _) = entry {
                 self.collect_heights_recursive(&child, map);
             }
         }
@@ -91,10 +94,10 @@ impl HotApp {
         let mut total_width = 0.0;
         for entry in &node.entries {
             match entry {
-                Entry::Child(_, child) => {
+                Entry::Child(_, child, _) => {
                     total_width += Self::get_subtree_width(&child);
                 }
-                Entry::Leaf(_, _) => {
+                Entry::Leaf(_, _, _) => {
                     total_width += 100.0; // Increased from 80
                 }
             }
@@ -104,8 +107,62 @@ impl HotApp {
         f32::max(total_width + spacing, 140.0)
     }
 
+    fn find_node(&self, id: u64) -> Option<&HOTNode<String, String>> {
+        if let Some(root) = &self.trie.root {
+            return self.find_node_recursive(root, id);
+        }
+        None
+    }
+
+    fn find_node_recursive<'a>(
+        &self,
+        node: &'a HOTNode<String, String>,
+        id: u64,
+    ) -> Option<&'a HOTNode<String, String>> {
+        if node.id == id {
+            return Some(node);
+        }
+        for entry in &node.entries {
+            if let Entry::Child(_, child, _) = entry {
+                if let Some(found) = self.find_node_recursive(child, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_key_by_id(&self, id: u64) -> Option<String> {
+        if let Some(root) = &self.trie.root {
+            return self.find_key_recursive(root, id);
+        }
+        None
+    }
+
+    fn find_key_recursive(&self, node: &HOTNode<String, String>, id: u64) -> Option<String> {
+        for entry in &node.entries {
+            match entry {
+                Entry::Leaf(k, _, _) => {
+                    if (k as *const _ as u64) == id {
+                        return Some(k.clone());
+                    }
+                }
+                Entry::Child(k, child, _) => {
+                    if (k as *const _ as u64) == id {
+                        return Some(k.clone());
+                    }
+                    if let Some(found) = self.find_key_recursive(child, id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn draw_node_recursive(
         highlighted_nodes: &mut HashSet<u64>,
+        hovered_node: &mut Option<u64>,
         last_op_message: &mut String,
         ui: &mut egui::Ui,
         node: &HOTNode<String, String>,
@@ -127,9 +184,19 @@ impl HotApp {
         // INTERACTION: Click to highlight
         let response = ui.interact(rect, ui.id().with(id), egui::Sense::click());
         if response.clicked() {
-            highlighted_nodes.clear();
-            highlighted_nodes.insert(id);
-            *last_op_message = format!("Node selected: ID {}", id);
+            let shift = ui.input(|i| i.modifiers.shift);
+            if !shift {
+                highlighted_nodes.clear();
+            }
+            if highlighted_nodes.contains(&id) && shift {
+                highlighted_nodes.remove(&id);
+            } else {
+                highlighted_nodes.insert(id);
+            }
+            *last_op_message = format!("Node selected: ID {} (Multi: {})", id, shift);
+        }
+        if response.hovered() {
+            *hovered_node = Some(id);
         }
 
         // Modern Premium Colors
@@ -156,14 +223,78 @@ impl HotApp {
         );
 
         // 3. Scale text
-        let label = format!("Height: {}", node.height);
+        let height_label = format!("Height: {}", node.height);
         ui.painter().text(
-            rect.center(),
+            rect.center() - egui::vec2(0.0, 10.0 * zoom),
             egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(18.0 * zoom),
+            height_label,
+            egui::FontId::proportional(16.0 * zoom),
             egui::Color32::WHITE,
         );
+
+        let mask_label = format!("Mask: {:?}", node.mask);
+        ui.painter().text(
+            rect.center() + egui::vec2(0.0, 15.0 * zoom),
+            egui::Align2::CENTER_CENTER,
+            mask_label,
+            egui::FontId::proportional(11.0 * zoom),
+            egui::Color32::from_rgb(180, 180, 255),
+        );
+
+        // Bit Inspector Tooltip
+        response.on_hover_ui(|ui| {
+            ui.set_max_width(400.0);
+            ui.heading("Bit Inspector");
+            ui.separator();
+            
+            if node.entries.len() >= 1 {
+                let k1 = node.entries[0].key();
+                let k2 = if node.entries.len() > 1 {
+                    node.entries[node.entries.len() - 1].key()
+                } else {
+                    k1
+                };
+
+                ui.label(format!("Representative keys: '{}' and '{}'", k1, k2));
+                ui.add_space(5.0);
+
+                if !node.mask.is_empty() {
+                    let min_bit = node.mask[0].saturating_sub(4);
+                    let max_bit = node.mask.iter().max().unwrap_or(&0) + 4;
+                    
+                    egui::Grid::new("bit_grid").spacing([4.0, 2.0]).show(ui, |ui| {
+                        ui.label(""); // Header
+                        for b in min_bit..=max_bit {
+                            let is_watched = node.mask.contains(&b);
+                            let color = if is_watched { egui::Color32::YELLOW } else { egui::Color32::GRAY };
+                            ui.label(egui::RichText::new(format!("{}", b)).size(9.0).color(color));
+                        }
+                        ui.end_row();
+
+                        ui.label("K1:");
+                        for b in min_bit..=max_bit {
+                            let is_watched = node.mask.contains(&b);
+                            let bit = k1.get_bit(b);
+                            let color = if is_watched { egui::Color32::WHITE } else { egui::Color32::from_gray(100) };
+                            ui.label(egui::RichText::new(if bit { "1" } else { "0" }).strong().color(color));
+                        }
+                        ui.end_row();
+
+                        ui.label("K2:");
+                        for b in min_bit..=max_bit {
+                            let is_watched = node.mask.contains(&b);
+                            let bit = k2.get_bit(b);
+                            let color = if is_watched { egui::Color32::WHITE } else { egui::Color32::from_gray(100) };
+                            ui.label(egui::RichText::new(if bit { "1" } else { "0" }).strong().color(color));
+                        }
+                        ui.end_row();
+                    });
+                    ui.label(egui::RichText::new("Yellow columns are watched by the mask.").small().italics());
+                } else {
+                    ui.label("No discriminative bits (Node has < 2 unique keys).");
+                }
+            }
+        });
 
         // 4. Scale subtree widths
         let total_width = Self::get_subtree_width(node) * zoom;
@@ -171,8 +302,8 @@ impl HotApp {
 
         for entry in &node.entries {
             let entry_width = match entry {
-                Entry::Child(_, child) => Self::get_subtree_width(&child) * zoom,
-                Entry::Leaf(_, _) => 100.0 * zoom,
+                Entry::Child(_, child, _) => Self::get_subtree_width(&child) * zoom,
+                Entry::Leaf(_, _, _) => 100.0 * zoom,
             };
 
             let child_center_x = current_x + entry_width / 2.0;
@@ -197,17 +328,25 @@ impl HotApp {
             }));
 
             match entry {
-                Entry::Leaf(k, _) => {
+                Entry::Leaf(k, _, _) => {
                     let leaf_id = k as *const _ as u64;
                     let is_leaf_highlighted = highlighted_nodes.contains(&leaf_id);
                     
                     let leaf_rect = egui::Rect::from_center_size(child_pos, egui::vec2(20.0 * zoom, 20.0 * zoom));
                     let leaf_response = ui.interact(leaf_rect, ui.id().with(leaf_id), egui::Sense::click());
                     
+                    
                     if leaf_response.clicked() {
-                        highlighted_nodes.clear();
-                        highlighted_nodes.insert(leaf_id);
-                        *last_op_message = format!("Leaf selected: '{}' (ID {})", k, leaf_id);
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        if !shift {
+                            highlighted_nodes.clear();
+                        }
+                        if highlighted_nodes.contains(&leaf_id) && shift {
+                            highlighted_nodes.remove(&leaf_id);
+                        } else {
+                            highlighted_nodes.insert(leaf_id);
+                        }
+                        *last_op_message = format!("Leaf selected: '{}' (Multi: {})", k, shift);
                     }
 
                     ui.painter().circle_filled(
@@ -227,18 +366,27 @@ impl HotApp {
                         egui::FontId::proportional(14.0 * zoom),
                         if is_leaf_highlighted { egui::Color32::WHITE } else { egui::Color32::from_rgb(220, 220, 240) },
                     );
+
+                    // Partial Key Label
+                    ui.painter().text(
+                        child_pos + egui::vec2(0.0, 38.0 * zoom),
+                        egui::Align2::CENTER_TOP,
+                        format!("pk: {:0width$b}", entry.partial_key(), width = node.mask.len().max(1)),
+                        egui::FontId::monospace(11.0 * zoom),
+                        egui::Color32::from_rgb(0, 255, 255),
+                    );
                 }
-                Entry::Child(rep, child) => {
+                Entry::Child(rep, child, _) => {
                     // Division reason label (prominent)
                     let text_pos = (pos + child_pos.to_vec2()) / 2.0 + egui::vec2(8.0 * zoom, -10.0 * zoom);
                     ui.painter().text(
                         text_pos,
                         egui::Align2::LEFT_CENTER,
-                        format!("rep: {}", rep),
+                        format!("rep: {} | pk: {:0width$b}", rep, entry.partial_key(), width = node.mask.len().max(1)),
                         egui::FontId::proportional(13.0 * zoom),
                         egui::Color32::from_rgb(180, 180, 255),
                     );
-                    Self::draw_node_recursive(highlighted_nodes, last_op_message, ui, &child, child_pos, zoom, false);
+                    Self::draw_node_recursive(highlighted_nodes, hovered_node, last_op_message, ui, &child, child_pos, zoom, false);
                 }
             }
 
@@ -250,6 +398,7 @@ impl HotApp {
 
 impl eframe::App for HotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.hovered_node = None;
         // --- Side Panel (Modernized Sidebar) ---
         // This panel is fixed and opaque, completely separate from the graph canvas.
         egui::SidePanel::left("control_panel")
@@ -533,6 +682,7 @@ impl eframe::App for HotApp {
                 // Draw tree
                 Self::draw_node_recursive(
                     &mut self.highlighted_nodes,
+                    &mut self.hovered_node,
                     &mut self.last_op_message,
                     ui,
                     root,
@@ -546,5 +696,133 @@ impl eframe::App for HotApp {
                 });
             }
         });
+
+        // --- Floating Bitwise Inspector (Bottom Right) ---
+        let mut targets = Vec::new();
+        
+        // Priority 1: All Highlighted Nodes
+        for &id in &self.highlighted_nodes {
+            if let Some(node) = self.find_node(id) {
+                if !node.entries.is_empty() {
+                    targets.push((node.entries[0].key().clone(), node.mask.clone()));
+                }
+            } else if let Some(key) = self.find_key_by_id(id) {
+                // Find parent node to get mask for this leaf
+                if let Some(root) = &self.trie.root {
+                    let mut mask = Vec::new();
+                    self.find_mask_for_key_recursive(root, id, &mut mask);
+                    targets.push((key, mask));
+                }
+            }
+        }
+
+        // Priority 2: Hovered Node (if nothing highlighted)
+        if targets.is_empty() {
+            if let Some(node_id) = self.hovered_node {
+                if let Some(node) = self.find_node(node_id) {
+                    if node.entries.len() >= 1 {
+                        targets.push((node.entries[0].key().clone(), node.mask.clone()));
+                        if node.entries.len() > 1 {
+                            targets.push((node.entries[1].key().clone(), node.mask.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !targets.is_empty() {
+            egui::Window::new("Bitwise Inspector")
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -20.0))
+                .resizable(true)
+                .default_width(400.0)
+                .collapsible(true)
+                .default_open(true)
+                .frame(egui::Frame::window(&ctx.style())
+                    .fill(egui::Color32::from_rgb(25, 25, 30))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 150, 50))))
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new(format!("Comparing {} Entries", targets.len())).strong().color(egui::Color32::WHITE));
+                    ui.add_space(8.0);
+
+                    // Combine all masks for unified view
+                    let mut combined_mask = HashSet::new();
+                    for (_, m) in &targets {
+                        for &b in m { combined_mask.insert(b); }
+                    }
+                    let mut sorted_mask: Vec<_> = combined_mask.into_iter().collect();
+                    sorted_mask.sort();
+
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        let render_key_bits = |ui: &mut egui::Ui, key: &str, name: &str, mask: &[usize]| {
+                            ui.horizontal(|ui| {
+                                ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(name).small().color(egui::Color32::GRAY)));
+                                let bytes = key.as_bytes();
+                                for (b_idx, &byte) in bytes.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        for i in 0..8 {
+                                            let bit_pos = b_idx * 8 + i;
+                                            let bit = (byte & (1 << (7 - i))) != 0;
+                                            let is_masked = mask.contains(&bit_pos);
+                                            let mut text = egui::RichText::new(if bit { "1" } else { "0" }).monospace().size(11.0);
+                                            if is_masked {
+                                                text = text.color(egui::Color32::RED).strong().underline();
+                                            } else {
+                                                text = text.color(egui::Color32::GRAY);
+                                            }
+                                            ui.label(text);
+                                        }
+                                    });
+                                    ui.add_space(6.0);
+                                }
+                            });
+                        };
+
+                        for (i, (key, mask)) in targets.iter().enumerate() {
+                            render_key_bits(ui, key, &format!("K{}", i+1), mask);
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Unified Mask Analysis:").small().strong().color(egui::Color32::from_rgb(255, 150, 50)));
+                    if !sorted_mask.is_empty() {
+                        for &m_bit in &sorted_mask {
+                                                        ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("• Bit {}:", m_bit)).small());
+                                for (k, _) in &targets {
+                                    ui.label(egui::RichText::new(if k.get_bit(m_bit) { "1" } else { "0" }).monospace().small());
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("No mask bits active.").small().italics());
+                    }
+                });
+        }
+    }
+}
+
+impl HotApp {
+    fn find_mask_for_key_recursive(&self, node: &HOTNode<String, String>, id: u64, mask: &mut Vec<usize>) -> bool {
+        for entry in &node.entries {
+            match entry {
+                Entry::Leaf(k, _, _) => {
+                    if (k as *const _ as u64) == id {
+                        *mask = node.mask.clone();
+                        return true;
+                    }
+                }
+                Entry::Child(k, child, _) => {
+                    if (k as *const _ as u64) == id {
+                        *mask = node.mask.clone();
+                        return true;
+                    }
+                    if self.find_mask_for_key_recursive(child, id, mask) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
