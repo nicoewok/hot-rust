@@ -49,6 +49,7 @@ pub enum SearchState {
     EvaluatingNode(usize), // step_index
     EvaluatingEdge(usize), // step_index
     ReachedLeaf,
+    Scanning(usize),       // step_index for range scan
     Finished(bool),
 }
 
@@ -217,6 +218,94 @@ where
         }
     }
 
+    /// Performs a range scan from `start_key` to `end_key` (inclusive).
+    pub fn range_scan(&self, start_key: &K, end_key: &K) -> Vec<K> {
+        let mut results = Vec::new();
+        let root = match &self.root {
+            Some(r) => r,
+            None => return results,
+        };
+
+        // 1. Find Start: Use existing search logic to find the leaf for start_key.
+        let mut stack = Vec::new();
+        let mut current_node = root;
+        loop {
+            let search_pk = current_node.extract_partial_key(start_key);
+            let mut found = false;
+            for (i, entry) in current_node.entries.iter().enumerate() {
+                if entry.partial_key() == search_pk {
+                    stack.push((current_node, i));
+                    match entry {
+                        Entry::Leaf(_, _, _) => {
+                            found = true;
+                        }
+                        Entry::Child(_, node, _) => {
+                            current_node = node;
+                            found = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            
+            if !found { break; }
+            
+            // Check if we just pushed a leaf
+            let (node, idx) = stack.last().unwrap();
+            if matches!(node.entries[*idx], Entry::Leaf(_, _, _)) {
+                break;
+            }
+        }
+
+        if stack.is_empty() {
+            return results;
+        }
+
+        // 3. Ascend/Descend and Collect
+        while let Some(&(node, idx)) = stack.last() {
+            let entry = &node.entries[idx];
+            let key = entry.key();
+
+            // While the current key is <= end_key
+            if key > end_key {
+                break;
+            }
+
+            match entry {
+                Entry::Leaf(k, _, _) => {
+                    // Add the current leaf to the results (if it's within range)
+                    if k >= start_key {
+                        results.push(k.clone());
+                    }
+
+                    // Increment the index in the current node.
+                    if let Some((_, i)) = stack.last_mut() {
+                        *i += 1;
+                    }
+                }
+                Entry::Child(_, child, _) => {
+                    // If moving into a child node, always start at index 0.
+                    stack.push((child, 0));
+                    continue;
+                }
+            }
+
+            // If the index exceeds the node's capacity, move up to the parent and take the next branch.
+            while let Some((n, i)) = stack.last() {
+                if *i >= n.entries.len() {
+                    stack.pop();
+                    if let Some((_, pi)) = stack.last_mut() {
+                        *pi += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        results
+    }
+
     /// Generates a Graphviz DOT representation of the trie.
     #[allow(dead_code)]
     pub fn to_dot(&self) -> String
@@ -229,5 +318,54 @@ where
         }
         dot.push_str("}\n");
         dot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_range_scan_simple() {
+        let mut trie = HOT::new(4);
+        trie.insert("apple".to_string(), 1);
+        trie.insert("banana".to_string(), 2);
+        trie.insert("cherry".to_string(), 3);
+        trie.insert("date".to_string(), 4);
+        trie.insert("eggplant".to_string(), 5);
+
+        let results = trie.range_scan(&"banana".to_string(), &"date".to_string());
+        assert_eq!(results, vec!["banana".to_string(), "cherry".to_string(), "date".to_string()]);
+    }
+
+    #[test]
+    fn test_range_scan_full() {
+        let mut trie = HOT::new(4);
+        trie.insert("a".to_string(), 1);
+        trie.insert("b".to_string(), 2);
+        trie.insert("c".to_string(), 3);
+
+        let results = trie.range_scan(&"a".to_string(), &"z".to_string());
+        assert_eq!(results, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn test_range_scan_empty() {
+        let trie: HOT<String, i32> = HOT::new(4);
+        let results = trie.range_scan(&"a".to_string(), &"z".to_string());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_range_scan_out_of_bounds() {
+        let mut trie = HOT::new(4);
+        trie.insert("b".to_string(), 1);
+        trie.insert("c".to_string(), 2);
+
+        let results = trie.range_scan(&"x".to_string(), &"z".to_string());
+        assert!(results.is_empty());
+
+        let results2 = trie.range_scan(&"a".to_string(), &"a".to_string());
+        assert!(results2.is_empty());
     }
 }

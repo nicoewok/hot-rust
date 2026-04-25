@@ -22,6 +22,20 @@ pub struct HotApp {
     animation_time: f64,
     last_step_time: f64,
     removal_result: Option<crate::trie::RemovalResult>,
+    // For range scan
+    range_start: String,
+    range_end: String,
+    range_results: Vec<String>,
+    range_paths: HashMap<String, Vec<u64>>,
+    range_scan_steps: Vec<ScanStep>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanStep {
+    VisitLeaf(u64, String), // Leaf ID, Key
+    Advance(u64, usize),    // Node ID, new index
+    Ascend(u64),            // Node ID we arrived at
+    Descend(u64),           // Node ID we arrived at
 }
 
 impl Default for HotApp {
@@ -43,6 +57,11 @@ impl Default for HotApp {
             animation_time: 0.0,
             last_step_time: 0.0,
             removal_result: None,
+            range_start: String::new(),
+            range_end: String::new(),
+            range_results: Vec::new(),
+            range_paths: HashMap::new(),
+            range_scan_steps: Vec::new(),
         }
     }
 }
@@ -178,6 +197,17 @@ impl HotApp {
 
         match &self.search_state {
             SearchState::Idle | SearchState::Finished(_) => {}
+            SearchState::Scanning(idx) => {
+                if time - self.last_step_time > 0.4 { // Faster steps for traversal
+                    self.last_step_time = time;
+                    if idx + 1 < self.range_scan_steps.len() {
+                        self.search_state = SearchState::Scanning(idx + 1);
+                    } else {
+                        self.search_state = SearchState::Finished(true);
+                    }
+                }
+                ctx.request_repaint();
+            }
             _ => {
                 if time - self.last_step_time > 1.2 {
                     self.last_step_time = time;
@@ -220,6 +250,9 @@ impl HotApp {
         pos: egui::Pos2,
         zoom: f32,
         is_root: bool,
+        range_results: &[String],
+        range_paths: &HashMap<String, Vec<u64>>,
+        range_scan_steps: &[ScanStep],
     ) {
         let id = node.id;
         let is_highlighted = highlighted_nodes.contains(&id);
@@ -263,6 +296,24 @@ impl HotApp {
             if let Some(res) = search_result {
                 if res.steps[*idx].node_id == id {
                     fill_color = egui::Color32::from_rgb(255, 255, 0); // YELLOW for current node
+                }
+            }
+        } else if let SearchState::Scanning(curr_step_idx) = search_state {
+            if let Some(step) = range_scan_steps.get(*curr_step_idx) {
+                let target_id = match step {
+                    ScanStep::VisitLeaf(lid, _) => *lid,
+                    ScanStep::Advance(nid, _) | ScanStep::Ascend(nid) | ScanStep::Descend(nid) => *nid,
+                };
+                if target_id == id {
+                    fill_color = egui::Color32::from_rgb(255, 200, 0); // GOLD for active traversal
+                }
+            }
+            // Still keep start path yellow
+            if !range_results.is_empty() {
+                if let Some(path) = range_paths.get(&range_results[0]) {
+                    if path.contains(&id) {
+                        fill_color = egui::Color32::from_rgb(200, 180, 0); // Dimmer Gold
+                    }
                 }
             }
         }
@@ -366,6 +417,29 @@ impl HotApp {
                         is_glowing = true;
                     }
                 }
+            } else if let SearchState::Scanning(curr_step_idx) = search_state {
+                if let Some(step) = range_scan_steps.get(*curr_step_idx) {
+                    match step {
+                        ScanStep::Advance(nid, idx) if *nid == id => {
+                            let entry_id = match &node.entries[*idx] {
+                                Entry::Leaf(k, _, _) => k as *const _ as u64,
+                                Entry::Child(_, child, _) => child.id,
+                            };
+                            if entry_id == child_id {
+                                is_edge_highlighted = true;
+                                is_glowing = true;
+                            }
+                        }
+                        ScanStep::Descend(nid) if *nid == child_id => {
+                            is_edge_highlighted = true;
+                            is_glowing = true;
+                        }
+                        ScanStep::Ascend(nid) if *nid == id => {
+                            is_edge_highlighted = true;
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             // Draw Edge
@@ -409,6 +483,20 @@ impl HotApp {
                         }
                     } else if is_leaf_highlighted {
                         leaf_color = egui::Color32::from_rgb(255, 165, 0);
+                    }
+
+                    // Range results glow green
+                    if !range_results.is_empty() && range_results.contains(k) {
+                        leaf_color = egui::Color32::from_rgb(0, 200, 80);
+                    }
+                    
+                    if let SearchState::Scanning(curr_step_idx) = search_state {
+                        if let Some(ScanStep::VisitLeaf(lid, _)) = range_scan_steps.get(*curr_step_idx) {
+                            if *lid == leaf_id {
+                                is_pulsing = true;
+                                leaf_color = egui::Color32::from_rgb(255, 255, 0);
+                            }
+                        }
                     }
 
                     let mut final_leaf_pos = child_pos;
@@ -455,7 +543,7 @@ impl HotApp {
                     );
                 }
                 Entry::Child(_rep, child, _) => {
-                    Self::draw_node_recursive(highlighted_nodes, highlighted_edges, search_result, search_state, animation_time, removal_result, hovered_node, last_op_message, ui, &child, child_pos, zoom, false);
+                    Self::draw_node_recursive(highlighted_nodes, highlighted_edges, search_result, search_state, animation_time, removal_result, hovered_node, last_op_message, ui, &child, child_pos, zoom, false, range_results, range_paths, range_scan_steps);
                 }
             }
             current_x += entry_width + padding;
@@ -607,6 +695,49 @@ impl eframe::App for HotApp {
                             }
                             self.highlighted_edges.clear();
                             self.search_result = None;
+                        }
+                    }
+
+                    ui.add_space(15.0);
+                    ui.separator();
+                    ui.add_space(15.0);
+                    
+                    ui.label(egui::RichText::new("RANGE SCAN").small().strong().color(egui::Color32::from_rgb(0, 255, 120)));
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("Start:");
+                            ui.add(egui::TextEdit::singleline(&mut self.range_start).desired_width(100.0));
+                        });
+                        ui.vertical(|ui| {
+                            ui.label("End:");
+                            ui.add(egui::TextEdit::singleline(&mut self.range_end).desired_width(100.0));
+                        });
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    if ui.add_sized([ui.available_width(), 42.0], egui::Button::new(egui::RichText::new("🎬 Animate Range Scan").size(16.0)).rounding(6.0)).clicked() {
+                        self.range_results = self.trie.range_scan(&self.range_start, &self.range_end);
+                        self.range_paths.clear();
+                        self.range_scan_steps = self.compute_range_scan_steps(&self.range_start, &self.range_end);
+                        
+                        // Path to start_key
+                        let (_, start_path) = self.trie.lookup_with_path(&self.range_start);
+                        self.range_paths.insert(self.range_start.clone(), start_path);
+
+                        for k in &self.range_results {
+                            let (_, path) = self.trie.lookup_with_path(k);
+                            self.range_paths.insert(k.clone(), path);
+                        }
+                        
+                        if !self.range_scan_steps.is_empty() {
+                            self.search_state = SearchState::Scanning(0);
+                            self.last_step_time = ctx.input(|i| i.time);
+                            self.last_op_message = format!("Traversing range '{}' to '{}' ({} steps)...", self.range_start, self.range_end, self.range_scan_steps.len());
+                        } else {
+                            self.last_op_message = "No keys found in range.".to_string();
                         }
                     }
                 });
@@ -833,11 +964,56 @@ impl eframe::App for HotApp {
                     start_pos,
                     self.zoom,
                     true,
+                    &self.range_results,
+                    &self.range_paths,
+                    &self.range_scan_steps,
                 );
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new("Trie is empty. Insert a key to begin.").size(18.0).color(egui::Color32::GRAY));
                 });
+            }
+
+            // --- Range Scan Status Overlay ---
+            if let SearchState::Scanning(idx) = self.search_state {
+                let rect = egui::Rect::from_min_size(
+                    canvas_rect.left_top() + egui::vec2(20.0, 20.0),
+                    egui::vec2(240.0, 100.0)
+                );
+                ui.painter().rect_filled(rect, 10.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+                ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 0)));
+                
+                ui.painter().text(
+                    rect.center() - egui::vec2(0.0, 25.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Traversing Range...",
+                    egui::FontId::proportional(20.0),
+                    egui::Color32::WHITE
+                );
+                
+                if let Some(step) = self.range_scan_steps.get(idx) {
+                    let msg = match step {
+                        ScanStep::VisitLeaf(_, k) => format!("Visiting Leaf: '{}'", k),
+                        ScanStep::Advance(_, _) => "Moving to Next Sibling".to_string(),
+                        ScanStep::Ascend(_) => "Ascending to Parent".to_string(),
+                        ScanStep::Descend(_) => "Descending to Child".to_string(),
+                    };
+                    ui.painter().text(
+                        rect.center() + egui::vec2(0.0, 5.0),
+                        egui::Align2::CENTER_CENTER,
+                        msg,
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(200, 200, 200)
+                    );
+                }
+
+                ui.painter().text(
+                    rect.center() + egui::vec2(0.0, 30.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Step {} of {}", idx + 1, self.range_scan_steps.len()),
+                    egui::FontId::proportional(16.0),
+                    egui::Color32::from_rgb(255, 200, 0)
+                );
             }
         });
 
@@ -968,5 +1144,94 @@ impl HotApp {
             }
         }
         false
+    }
+
+    fn compute_range_scan_steps(&self, start_key: &str, end_key: &str) -> Vec<ScanStep> {
+        let mut steps = Vec::new();
+        let root = match &self.trie.root {
+            Some(r) => r,
+            None => return steps,
+        };
+
+        let mut stack = Vec::new();
+        let mut current_node = root;
+        
+        // 1. Find Start
+        loop {
+            let pk = current_node.extract_partial_key(&start_key.to_string());
+            let mut found = false;
+            for (i, entry) in current_node.entries.iter().enumerate() {
+                if entry.partial_key() == pk {
+                    stack.push((current_node, i));
+                    match entry {
+                        Entry::Leaf(_, _, _) => {
+                            found = true;
+                        }
+                        Entry::Child(_, child, _) => {
+                            steps.push(ScanStep::Descend(child.id));
+                            current_node = child;
+                            found = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            
+            if !found { break; }
+            
+            let (node, idx) = stack.last().unwrap();
+            if matches!(node.entries[*idx], Entry::Leaf(_, _, _)) {
+                break;
+            }
+        }
+
+        if stack.is_empty() {
+            return steps;
+        }
+
+        // 3. Ascend/Descend and Collect
+        while let Some(&(node, idx)) = stack.last() {
+            let entry = &node.entries[idx];
+            let key = entry.key();
+
+            if key > &end_key.to_string() {
+                break;
+            }
+
+            match entry {
+                Entry::Leaf(k, _, _) => {
+                    steps.push(ScanStep::VisitLeaf(k as *const _ as u64, k.clone()));
+
+                    if let Some((_, i)) = stack.last_mut() {
+                        *i += 1;
+                        if *i < node.entries.len() {
+                            steps.push(ScanStep::Advance(node.id, *i));
+                        }
+                    }
+                }
+                Entry::Child(_, child, _) => {
+                    stack.push((child, 0));
+                    steps.push(ScanStep::Descend(child.id));
+                    continue;
+                }
+            }
+
+            while let Some((n, i)) = stack.last() {
+                if *i >= n.entries.len() {
+                    stack.pop();
+                    if let Some((pnode, pi)) = stack.last_mut() {
+                        *pi += 1;
+                        steps.push(ScanStep::Ascend(pnode.id));
+                        if *pi < pnode.entries.len() {
+                            steps.push(ScanStep::Advance(pnode.id, *pi));
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        steps
     }
 }
