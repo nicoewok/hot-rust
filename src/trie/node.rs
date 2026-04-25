@@ -1,9 +1,39 @@
-use crate::trie::Entry;
+use crate::trie::{Entry, SearchStep};
 use crate::trie::{InsertResult, RemoveResult};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NODE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_pext_u64;
+
+/// Software fallback for PEXT when BMI2 is not available.
+fn pext_soft(val: u64, mut mask: u64) -> u64 {
+    let mut res = 0;
+    let mut bit = 1;
+    while mask != 0 {
+        let lowest = mask & mask.wrapping_neg();
+        if (val & lowest) != 0 {
+            res |= bit;
+        }
+        bit <<= 1;
+        mask ^= lowest;
+    }
+    res
+}
+
+/// Hardware accelerated PEXT with software fallback.
+pub fn pext(val: u64, mask: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // BMI2 check
+        if std::is_x86_feature_detected!("bmi2") {
+            return unsafe { _pext_u64(val, mask) };
+        }
+    }
+    pext_soft(val, mask)
+}
 
 /// A node in the Height Optimized Trie.
 #[derive(Debug, Clone)]
@@ -16,6 +46,8 @@ pub struct HOTNode<K, V> {
     pub entries: Vec<Entry<K, V>>,
     /// The bit-positions that distinguish the keys in this node.
     pub mask: Vec<usize>,
+    /// The byte offset for the 8-byte chunk used for partial key extraction.
+    pub byte_offset: usize,
 }
 
 /// Trait for keys that can be used in a HOT node, allowing bit-level access.
@@ -24,6 +56,8 @@ pub trait HotKey {
     fn get_bit(&self, pos: usize) -> bool;
     /// Returns the first bit position where two keys differ.
     fn first_differing_bit(&self, other: &Self) -> Option<usize>;
+    /// Returns 8 bytes from the key starting at the given byte offset as a big-endian u64.
+    fn get_u64_at(&self, byte_offset: usize) -> u64;
 }
 
 /// Helper function to find the first bit position where two strings differ.
@@ -62,6 +96,17 @@ impl HotKey for String {
     fn first_differing_bit(&self, other: &Self) -> Option<usize> {
         find_first_diff_bit(self, other)
     }
+
+    fn get_u64_at(&self, byte_offset: usize) -> u64 {
+        let bytes = self.as_bytes();
+        let mut val = 0u64;
+        for i in 0..8 {
+            if byte_offset + i < bytes.len() {
+                val |= (bytes[byte_offset + i] as u64) << (8 * (7 - i));
+            }
+        }
+        val
+    }
 }
 
 impl HotKey for u64 {
@@ -80,6 +125,10 @@ impl HotKey for u64 {
         } else {
             Some(diff.leading_zeros() as usize)
         }
+    }
+
+    fn get_u64_at(&self, _byte_offset: usize) -> u64 {
+        *self
     }
 }
 
@@ -100,6 +149,10 @@ impl HotKey for u32 {
             Some(diff.leading_zeros() as usize)
         }
     }
+
+    fn get_u64_at(&self, _byte_offset: usize) -> u64 {
+        (*self as u64) << 32
+    }
 }
 
 impl<K, V> HOTNode<K, V> {
@@ -110,6 +163,7 @@ impl<K, V> HOTNode<K, V> {
             height,
             entries: Vec::with_capacity(fanout),
             mask: Vec::new(),
+            byte_offset: 0,
         }
     }
 
@@ -184,21 +238,89 @@ impl<K, V> HOTNode<K, V> {
         None
     }
 
+    /// Performs a full search following the HOT algorithm with detailed path info.
+    pub fn search(
+        &self,
+        key: &K,
+        path: &mut Vec<u64>,
+        edges: &mut Vec<(u64, u64)>,
+        steps: &mut Vec<SearchStep>,
+    ) -> (Option<u64>, bool)
+    where
+        K: Ord + HotKey,
+    {
+        path.push(self.id);
+        if self.entries.is_empty() {
+            return (None, false);
+        }
+
+        let search_pk = self.extract_partial_key(key);
+        
+        let mut step = SearchStep {
+            node_id: self.id,
+            partial_key: search_pk,
+            mask: self.mask.clone(),
+            byte_offset: self.byte_offset,
+            matched_entry_id: None,
+        };
+
+        for entry in &self.entries {
+            if entry.partial_key() == search_pk {
+                match entry {
+                    Entry::Leaf(k, _, _) => {
+                        let leaf_id = k as *const _ as u64;
+                        step.matched_entry_id = Some(leaf_id);
+                        steps.push(step);
+                        edges.push((self.id, leaf_id));
+                        return (Some(leaf_id), k == key);
+                    }
+                    Entry::Child(_, node, _) => {
+                        step.matched_entry_id = Some(node.id);
+                        steps.push(step);
+                        edges.push((self.id, node.id));
+                        return node.search(key, path, edges, steps);
+                    }
+                }
+            }
+        }
+        steps.push(step);
+        (None, false)
+    }
+
     /// Removes a node or leaf from the trie if its memory address matches target_id.
-    pub fn remove_by_id(&mut self, target_id: u64) -> RemoveResult {
+    pub fn remove_by_id(&mut self, target_id: u64) -> RemoveResult<K, V>
+    where
+        K: Ord + Clone + HotKey,
+        V: Clone,
+    {
         let mut to_remove = None;
+        let mut underflow_entry = None;
+        let child_updated = false;
+        let mask = self.mask.clone();
+
         for (i, entry) in self.entries.iter_mut().enumerate() {
             match entry {
-                Entry::Child(_, node, _) => {
+                Entry::Child(rep, node, pk) => {
                     if node.id == target_id {
                         to_remove = Some(i);
                         break;
                     }
                     match node.remove_by_id(target_id) {
                         RemoveResult::NotFound => {}
-                        RemoveResult::Removed => return RemoveResult::Removed,
+                        RemoveResult::Removed(ids) => {
+                            let new_rep = node.entries[0].key().clone();
+                            if &new_rep != rep {
+                                *rep = new_rep.clone();
+                                *pk = Self::extract_partial_key_static(&mask, mask.first().map(|&b| b / 8).unwrap_or(0), &new_rep);
+                            }
+                            return RemoveResult::Removed(ids);
+                        }
                         RemoveResult::Empty => {
                             to_remove = Some(i);
+                            break;
+                        }
+                        RemoveResult::Underflow(child_entry, collapsed) => {
+                            underflow_entry = Some((i, child_entry, collapsed));
                             break;
                         }
                     }
@@ -212,14 +334,98 @@ impl<K, V> HOTNode<K, V> {
             }
         }
 
-        if let Some(idx) = to_remove {
-            self.entries.remove(idx);
-            if self.entries.is_empty() {
-                return RemoveResult::Empty;
-            } else {
-                return RemoveResult::Removed;
+        self.handle_removal_post_process(to_remove, underflow_entry, child_updated)
+    }
+
+    /// Performs a removal by key with underflow handling.
+    pub fn remove(&mut self, key: &K) -> RemoveResult<K, V>
+    where
+        K: Ord + Clone + HotKey,
+        V: Clone,
+    {
+        let mut to_remove = None;
+        let mut underflow_entry = None;
+        let child_updated = false;
+        let mask = self.mask.clone();
+
+        let search_pk = self.extract_partial_key(key);
+
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            if entry.partial_key() == search_pk {
+                match entry {
+                    Entry::Leaf(k, _, _) => {
+                        if k == key {
+                            to_remove = Some(i);
+                            break;
+                        }
+                    }
+                    Entry::Child(rep, node, pk) => {
+                        match node.remove(key) {
+                            RemoveResult::NotFound => return RemoveResult::NotFound,
+                            RemoveResult::Removed(ids) => {
+                                let new_rep = node.entries[0].key().clone();
+                                if &new_rep != rep {
+                                    *rep = new_rep.clone();
+                                    *pk = Self::extract_partial_key_static(&mask, mask.first().map(|&b| b / 8).unwrap_or(0), &new_rep);
+                                }
+                                return RemoveResult::Removed(ids);
+                            }
+                            RemoveResult::Empty => {
+                                to_remove = Some(i);
+                                break;
+                            }
+                            RemoveResult::Underflow(child_entry, collapsed) => {
+                                underflow_entry = Some((i, child_entry, collapsed));
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        self.handle_removal_post_process(to_remove, underflow_entry, child_updated)
+    }
+
+    fn handle_removal_post_process(
+        &mut self,
+        to_remove: Option<usize>,
+        underflow_entry: Option<(usize, Entry<K, V>, Vec<u64>)>,
+        child_updated: bool,
+    ) -> RemoveResult<K, V>
+    where
+        K: Ord + Clone + HotKey,
+        V: Clone,
+    {
+        if let Some(idx) = to_remove {
+            self.entries.remove(idx);
+            self.update_mask_from_entries();
+            if self.entries.is_empty() {
+                return RemoveResult::Empty;
+            } else if self.entries.len() == 1 {
+                return RemoveResult::Underflow(self.entries.remove(0), vec![self.id]);
+            } else {
+                return RemoveResult::Removed(vec![self.id]);
+            }
+        }
+
+        if let Some((idx, mut child_entry, mut collapsed)) = underflow_entry {
+            let new_pk = self.extract_partial_key(child_entry.key());
+            child_entry.set_partial_key(new_pk);
+            self.entries[idx] = child_entry;
+            self.update_mask_from_entries();
+            if self.entries.len() == 1 {
+                collapsed.push(self.id);
+                return RemoveResult::Underflow(self.entries.remove(0), collapsed);
+            } else {
+                return RemoveResult::Removed(collapsed);
+            }
+        }
+
+        if child_updated {
+            return RemoveResult::Removed(vec![self.id]);
+        }
+
         RemoveResult::NotFound
     }
 
@@ -282,7 +488,8 @@ impl<K, V> HOTNode<K, V> {
                         match res {
                             InsertResult::NewMin(new_k) => {
                                 *rep = new_k.clone();
-                                *pk = Self::extract_partial_key_static(&self.mask, &new_k);
+                                *pk = Self::extract_partial_key_static(&self.mask, self.byte_offset, &new_k);
+                                self.update_mask_from_entries();
                                 if idx == 0 {
                                     InsertResult::NewMin(new_k)
                                 } else {
@@ -307,7 +514,8 @@ impl<K, V> HOTNode<K, V> {
                             match res {
                                 InsertResult::NewMin(new_k) => {
                                     *rep = new_k.clone();
-                                    *pk = Self::extract_partial_key_static(&self.mask, &new_k);
+                                    *pk = Self::extract_partial_key_static(&self.mask, self.byte_offset, &new_k);
+                                    self.update_mask_from_entries();
                                     if prev_idx == 0 {
                                         InsertResult::NewMin(new_k)
                                     } else {
@@ -407,21 +615,34 @@ impl<K, V> HOTNode<K, V> {
     where
         K: Clone + HotKey,
     {
-        let mid = self.entries.len() / 2;
-        let right_entries = self.entries.split_off(mid);
+        // Bit-Aware Splitting: Find the most significant bit (smallest bit index)
+        // that distinguishes any pair of adjacent representative keys.
+        let mut best_bit = None;
+        let mut split_idx = self.entries.len() / 2;
+
+        for i in 0..self.entries.len() - 1 {
+            if let Some(pos) = self.entries[i].key().first_differing_bit(self.entries[i + 1].key()) {
+                if best_bit.is_none() || pos < best_bit.unwrap() {
+                    best_bit = Some(pos);
+                    split_idx = i + 1;
+                }
+            }
+        }
+
+        let right_entries = self.entries.split_off(split_idx);
         let left_entries = std::mem::take(&mut self.entries);
 
         let mut left_node = HOTNode::new(self.height, self.entries.len());
         left_node.entries = left_entries;
         left_node.update_mask_from_entries();
         let left_rep = left_node.entries[0].key().clone();
-        let left_pk = self.extract_partial_key(&left_rep);
+        let left_pk = 0; // Temporary, will be updated by parent
 
         let mut right_node = HOTNode::new(self.height, right_entries.len());
         right_node.entries = right_entries;
         right_node.update_mask_from_entries();
         let right_rep = right_node.entries[0].key().clone();
-        let right_pk = self.extract_partial_key(&right_rep);
+        let right_pk = 0; // Temporary, will be updated by parent
 
         InsertResult::Split(
             Entry::Child(left_rep, Box::new(left_node), left_pk),
@@ -449,6 +670,8 @@ impl<K, V> HOTNode<K, V> {
                     new_node.entries.push(Entry::Leaf(old_k, old_v, k2_pk));
                     new_node.entries.push(Entry::Leaf(key.clone(), value, k1_pk));
                 }
+
+                new_node.update_mask_from_entries();
 
                 let rep_key = new_node.entries[0].key().clone();
                 let pk = self.extract_partial_key(&rep_key);
@@ -526,8 +749,9 @@ impl<K, V> HOTNode<K, V> {
         K: HotKey,
     {
         let mask = &self.mask;
+        let byte_offset = self.byte_offset;
         for entry in self.entries.iter_mut() {
-            let pk = Self::extract_partial_key_static(mask, entry.key());
+            let pk = Self::extract_partial_key_static(mask, byte_offset, entry.key());
             match entry {
                 Entry::Leaf(_, _, p) => *p = pk,
                 Entry::Child(_, _, p) => *p = pk,
@@ -535,29 +759,33 @@ impl<K, V> HOTNode<K, V> {
         }
     }
 
-    /// Extracts a partial key using a specific discriminative mask.
-    pub fn extract_partial_key_static(mask: &[usize], key: &K) -> u32
+    /// Extracts a partial key using a specific discriminative mask and byte offset.
+    pub fn extract_partial_key_static(mask_bits: &[usize], byte_offset: usize, key: &K) -> u32
     where
         K: HotKey,
     {
-        let mut partial_key = 0u32;
-        for (i, &bit_pos) in mask.iter().enumerate() {
-            if i >= 32 {
-                break;
-            }
-            if key.get_bit(bit_pos) {
-                partial_key |= 1 << (mask.len().min(32) - 1 - i);
+        if mask_bits.is_empty() {
+            return 0;
+        }
+
+        let val = key.get_u64_at(byte_offset);
+        let mut mask = 0u64;
+        for &bit_pos in mask_bits {
+            let relative_pos = bit_pos.saturating_sub(byte_offset * 8);
+            if relative_pos < 64 {
+                mask |= 1 << (63 - relative_pos);
             }
         }
-        partial_key
+
+        pext(val, mask) as u32
     }
 
-    /// Extracts a partial key from the given key using the node's discriminative mask.
+    /// Extracts a partial key from the given key using the node's discriminative mask and offset.
     pub fn extract_partial_key(&self, key: &K) -> u32
     where
         K: HotKey,
     {
-        Self::extract_partial_key_static(&self.mask, key)
+        Self::extract_partial_key_static(&self.mask, self.byte_offset, key)
     }
 
     /// Automatically updates the discriminative mask based on the current entries in the node.
@@ -582,8 +810,11 @@ impl<K, V> HOTNode<K, V> {
         let mut mask_vec: Vec<usize> = new_mask.into_iter().collect();
         mask_vec.sort();
 
-        if self.mask != mask_vec {
+        let new_byte_offset = mask_vec.first().map(|&b| b / 8).unwrap_or(0);
+
+        if self.mask != mask_vec || self.byte_offset != new_byte_offset {
             self.mask = mask_vec;
+            self.byte_offset = new_byte_offset;
             self.refresh_partial_keys();
         }
     }

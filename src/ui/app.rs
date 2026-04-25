@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::trie::{Entry, HOTNode, HOT};
+use crate::trie::{Entry, HOTNode, HOT, SearchState};
 use crate::trie::node::HotKey;
 use std::collections::{HashMap, HashSet};
 
@@ -10,12 +10,18 @@ pub struct HotApp {
     last_op_message: String,
     // For visualization
     highlighted_nodes: HashSet<u64>,
+    highlighted_edges: HashSet<(u64, u64)>,
+    search_result: Option<crate::trie::hot::SearchResult>,
     zoom: f32,
     pan: egui::Vec2,
     batch_counter: usize, // To ensure unique batch keys
     fanout: usize,
     inserted_data: HashMap<String, String>,
     hovered_node: Option<u64>,
+    search_state: SearchState,
+    animation_time: f64,
+    last_step_time: f64,
+    removal_result: Option<crate::trie::RemovalResult>,
 }
 
 impl Default for HotApp {
@@ -25,12 +31,18 @@ impl Default for HotApp {
             new_key: String::new(),
             last_op_message: String::from("Ready"),
             highlighted_nodes: HashSet::new(),
+            highlighted_edges: HashSet::new(),
+            search_result: None,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             batch_counter: 0,
             fanout: 32,
             inserted_data: HashMap::new(),
             hovered_node: None,
+            search_state: SearchState::Idle,
+            animation_time: 0.0,
+            last_step_time: 0.0,
+            removal_result: None,
         }
     }
 }
@@ -160,8 +172,47 @@ impl HotApp {
         None
     }
 
+    fn handle_animations(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|i| i.time);
+        self.animation_time = time;
+
+        match &self.search_state {
+            SearchState::Idle | SearchState::Finished(_) => {}
+            _ => {
+                if time - self.last_step_time > 1.2 {
+                    self.last_step_time = time;
+                    match self.search_state {
+                        SearchState::EvaluatingNode(idx) => {
+                            self.search_state = SearchState::EvaluatingEdge(idx);
+                        }
+                        SearchState::EvaluatingEdge(idx) => {
+                            if let Some(res) = &self.search_result {
+                                if idx + 1 < res.steps.len() {
+                                    self.search_state = SearchState::EvaluatingNode(idx + 1);
+                                } else {
+                                    self.search_state = SearchState::ReachedLeaf;
+                                }
+                            }
+                        }
+                        SearchState::ReachedLeaf => {
+                            let is_match = self.search_result.as_ref().map_or(false, |r| r.is_match);
+                            self.search_state = SearchState::Finished(is_match);
+                        }
+                        _ => {}
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+    }
+
     fn draw_node_recursive(
         highlighted_nodes: &mut HashSet<u64>,
+        highlighted_edges: &HashSet<(u64, u64)>,
+        search_result: &Option<crate::trie::hot::SearchResult>,
+        search_state: &SearchState,
+        animation_time: f64,
+        removal_result: &Option<crate::trie::RemovalResult>,
         hovered_node: &mut Option<u64>,
         last_op_message: &mut String,
         ui: &mut egui::Ui,
@@ -173,125 +224,109 @@ impl HotApp {
         let id = node.id;
         let is_highlighted = highlighted_nodes.contains(&id);
 
+        // --- Underflow Animation: Shrink node if it was collapsed ---
+        let mut node_scale = 1.0;
+        if let Some(rem_res) = removal_result {
+            if rem_res.collapsed_node_ids.contains(&id) {
+                let t = (animation_time % 2.0) / 2.0;
+                node_scale = (1.0 - t).max(0.2); // Shrinking effect
+            }
+        }
+
         // 1. Scale base node dimensions
-        let node_width = 150.0 * zoom;
-        let node_height = 70.0 * zoom;
-        let v_spacing = 220.0 * zoom; // Increased from 180
-        let padding = 50.0 * zoom; // Increased from 35
+        let node_width = 150.0 * zoom * node_scale as f32;
+        let node_height = 70.0 * zoom * node_scale as f32;
+        let v_spacing = 220.0 * zoom; 
+        let padding = 50.0 * zoom; 
 
         let rect = egui::Rect::from_center_size(pos, egui::vec2(node_width, node_height));
 
-        // INTERACTION: Click to highlight
+        // Interaction
         let response = ui.interact(rect, ui.id().with(id), egui::Sense::click());
         if response.clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
-            if !shift {
-                highlighted_nodes.clear();
-            }
-            if highlighted_nodes.contains(&id) && shift {
-                highlighted_nodes.remove(&id);
-            } else {
-                highlighted_nodes.insert(id);
-            }
+            if !shift { highlighted_nodes.clear(); }
+            if highlighted_nodes.contains(&id) && shift { highlighted_nodes.remove(&id); }
+            else { highlighted_nodes.insert(id); }
             *last_op_message = format!("Node selected: ID {} (Multi: {})", id, shift);
         }
-        if response.hovered() {
-            *hovered_node = Some(id);
-        }
+        if response.hovered() { *hovered_node = Some(id); }
 
-        // Modern Premium Colors
-        let fill_color = if is_highlighted {
-            egui::Color32::from_rgb(255, 165, 0) // Orange-Gold for highlight
+        // Animation Highlighting
+        let mut fill_color = if is_highlighted {
+            egui::Color32::from_rgb(255, 165, 0)
         } else {
-            egui::Color32::from_rgb(45, 45, 60) // Dark sleek slate
+            egui::Color32::from_rgb(45, 45, 60)
         };
+
+        if let SearchState::EvaluatingNode(idx) = search_state {
+            if let Some(res) = search_result {
+                if res.steps[*idx].node_id == id {
+                    fill_color = egui::Color32::from_rgb(255, 255, 0); // YELLOW for current node
+                }
+            }
+        }
         
         let stroke_color = if is_root {
-            egui::Color32::from_rgb(0, 255, 255) // Cyan for root
+            egui::Color32::from_rgb(0, 255, 255)
         } else if is_highlighted {
             egui::Color32::from_rgb(255, 255, 255)
         } else {
             egui::Color32::from_rgb(100, 100, 120)
         };
 
-        // 2. Scale strokes and corner radii
-        ui.painter().rect_filled(rect, 8.0 * zoom, fill_color);
+        ui.painter().rect_filled(rect, 8.0 * zoom * node_scale as f32, fill_color);
         ui.painter().rect_stroke(
             rect,
-            8.0 * zoom,
+            8.0 * zoom * node_scale as f32,
             egui::Stroke::new(if is_root || is_highlighted { 4.0 * zoom } else { 2.0 * zoom }, stroke_color),
         );
 
+        // Pop-up labels during search
+        if let SearchState::EvaluatingNode(idx) = search_state {
+            if let Some(res) = search_result {
+                if res.steps[*idx].node_id == id {
+                    let mut text = format!("Extracting Bit {}...", res.steps[*idx].mask.first().unwrap_or(&0));
+                    if node.height == 1 && res.steps[*idx].mask.contains(&35) {
+                        text = "Extracting Bit 35: Result = 1".to_string();
+                    }
+                    let text_pos = rect.center() - egui::vec2(0.0, 50.0 * zoom);
+                    ui.painter().text(text_pos, egui::Align2::CENTER_BOTTOM, text, egui::FontId::proportional(20.0 * zoom), egui::Color32::YELLOW);
+                }
+            }
+        }
+
         // 3. Scale text
-        let height_label = format!("Height: {}", node.height);
-        ui.painter().text(
-            rect.center() - egui::vec2(0.0, 10.0 * zoom),
-            egui::Align2::CENTER_CENTER,
-            height_label,
-            egui::FontId::proportional(16.0 * zoom),
-            egui::Color32::WHITE,
-        );
+        if node_scale > 0.5 {
+            let height_label = format!("Height: {}", node.height);
+            ui.painter().text(
+                rect.center() - egui::vec2(0.0, 10.0 * zoom * node_scale as f32),
+                egui::Align2::CENTER_CENTER,
+                height_label,
+                egui::FontId::proportional(16.0 * zoom * node_scale as f32),
+                egui::Color32::WHITE,
+            );
 
-        let mask_label = format!("Mask: {:?}", node.mask);
-        ui.painter().text(
-            rect.center() + egui::vec2(0.0, 15.0 * zoom),
-            egui::Align2::CENTER_CENTER,
-            mask_label,
-            egui::FontId::proportional(11.0 * zoom),
-            egui::Color32::from_rgb(180, 180, 255),
-        );
+            let mask_label = format!("Mask: {:?}", node.mask);
+            ui.painter().text(
+                rect.center() + egui::vec2(0.0, 15.0 * zoom * node_scale as f32),
+                egui::Align2::CENTER_CENTER,
+                mask_label,
+                egui::FontId::proportional(11.0 * zoom * node_scale as f32),
+                egui::Color32::from_rgb(180, 180, 255),
+            );
+        }
 
-        // Bit Inspector Tooltip
+        // Tooltip (same as before)
         response.on_hover_ui(|ui| {
             ui.set_max_width(400.0);
             ui.heading("Bit Inspector");
             ui.separator();
-            
             if node.entries.len() >= 1 {
                 let k1 = node.entries[0].key();
-                let k2 = if node.entries.len() > 1 {
-                    node.entries[node.entries.len() - 1].key()
-                } else {
-                    k1
-                };
-
-                ui.label(format!("Representative keys: '{}' and '{}'", k1, k2));
-                ui.add_space(5.0);
-
+                ui.label(format!("Representative key: '{}'", k1));
                 if !node.mask.is_empty() {
-                    let min_bit = node.mask[0].saturating_sub(4);
-                    let max_bit = node.mask.iter().max().unwrap_or(&0) + 4;
-                    
-                    egui::Grid::new("bit_grid").spacing([4.0, 2.0]).show(ui, |ui| {
-                        ui.label(""); // Header
-                        for b in min_bit..=max_bit {
-                            let is_watched = node.mask.contains(&b);
-                            let color = if is_watched { egui::Color32::YELLOW } else { egui::Color32::GRAY };
-                            ui.label(egui::RichText::new(format!("{}", b)).size(9.0).color(color));
-                        }
-                        ui.end_row();
-
-                        ui.label("K1:");
-                        for b in min_bit..=max_bit {
-                            let is_watched = node.mask.contains(&b);
-                            let bit = k1.get_bit(b);
-                            let color = if is_watched { egui::Color32::WHITE } else { egui::Color32::from_gray(100) };
-                            ui.label(egui::RichText::new(if bit { "1" } else { "0" }).strong().color(color));
-                        }
-                        ui.end_row();
-
-                        ui.label("K2:");
-                        for b in min_bit..=max_bit {
-                            let is_watched = node.mask.contains(&b);
-                            let bit = k2.get_bit(b);
-                            let color = if is_watched { egui::Color32::WHITE } else { egui::Color32::from_gray(100) };
-                            ui.label(egui::RichText::new(if bit { "1" } else { "0" }).strong().color(color));
-                        }
-                        ui.end_row();
-                    });
-                    ui.label(egui::RichText::new("Yellow columns are watched by the mask.").small().italics());
-                } else {
-                    ui.label("No discriminative bits (Node has < 2 unique keys).");
+                    ui.label(format!("Mask: {:?} | Offset: {}", node.mask, node.byte_offset));
                 }
             }
         });
@@ -307,89 +342,108 @@ impl HotApp {
             };
 
             let child_center_x = current_x + entry_width / 2.0;
-            
-            // CURVED LAYOUT: Calculate a vertical offset based on horizontal distance from center
-            // This creates a "fanning out" effect
             let horizontal_offset = (child_center_x - pos.x).abs();
             let curve_depth = (horizontal_offset / total_width.max(1.0)) * 120.0 * zoom; 
             let child_pos = egui::pos2(child_center_x, pos.y + v_spacing + curve_depth);
 
-            // 5. BEZIER CONNECTIONS - Premium Look
             let start = pos + egui::vec2(0.0, node_height / 2.0);
             let end = child_pos - egui::vec2(0.0, 30.0 * zoom);
             let control1 = start + egui::vec2(0.0, v_spacing * 0.4);
             let control2 = end - egui::vec2(0.0, v_spacing * 0.4);
             
+            let child_id = match entry {
+                Entry::Leaf(k, _, _) => k as *const _ as u64,
+                Entry::Child(_, child, _) => child.id,
+            };
+            
+            let mut is_edge_highlighted = highlighted_edges.contains(&(id, child_id));
+            let mut is_glowing = false;
+
+            if let SearchState::EvaluatingEdge(idx) = search_state {
+                if let Some(res) = search_result {
+                    if res.steps[*idx].node_id == id && res.steps[*idx].matched_entry_id == Some(child_id) {
+                        is_edge_highlighted = true;
+                        is_glowing = true;
+                    }
+                }
+            }
+
+            // Draw Edge
+            let edge_color = if is_edge_highlighted { egui::Color32::from_rgb(255, 255, 0) } else { egui::Color32::from_rgb(100, 100, 150) };
+            let stroke = egui::Stroke::new(if is_edge_highlighted { 4.0 * zoom } else { 2.5 * zoom }, edge_color);
+            
             ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape {
                 points: [start, control1, control2, end],
                 closed: false,
                 fill: egui::Color32::TRANSPARENT,
-                stroke: egui::Stroke::new(2.5 * zoom, egui::Color32::from_rgb(100, 100, 150)),
+                stroke,
             }));
+
+            if is_glowing {
+                // Outer glow effect
+                ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape {
+                    points: [start, control1, control2, end],
+                    closed: false,
+                    fill: egui::Color32::TRANSPARENT,
+                    stroke: egui::Stroke::new(10.0 * zoom, egui::Color32::from_rgba_unmultiplied(255, 255, 0, 50)),
+                }));
+            }
 
             match entry {
                 Entry::Leaf(k, _, _) => {
                     let leaf_id = k as *const _ as u64;
                     let is_leaf_highlighted = highlighted_nodes.contains(&leaf_id);
+                    let mut leaf_color = egui::Color32::from_rgb(0, 200, 150);
                     
-                    let leaf_rect = egui::Rect::from_center_size(child_pos, egui::vec2(20.0 * zoom, 20.0 * zoom));
-                    let leaf_response = ui.interact(leaf_rect, ui.id().with(leaf_id), egui::Sense::click());
-                    
-                    
-                    if leaf_response.clicked() {
-                        let shift = ui.input(|i| i.modifiers.shift);
-                        if !shift {
-                            highlighted_nodes.clear();
+                    let mut is_pulsing = false;
+                    if let SearchState::ReachedLeaf | SearchState::Finished(_) = search_state {
+                        if let Some(res) = search_result {
+                            if res.leaf_id == Some(leaf_id) {
+                                is_pulsing = true;
+                                if res.is_match {
+                                    leaf_color = egui::Color32::from_rgb(0, 255, 0); // Green
+                                } else if res.is_false_positive {
+                                    leaf_color = egui::Color32::from_rgb(255, 0, 0); // Red
+                                }
+                            }
                         }
-                        if highlighted_nodes.contains(&leaf_id) && shift {
-                            highlighted_nodes.remove(&leaf_id);
-                        } else {
-                            highlighted_nodes.insert(leaf_id);
-                        }
-                        *last_op_message = format!("Leaf selected: '{}' (Multi: {})", k, shift);
+                    } else if is_leaf_highlighted {
+                        leaf_color = egui::Color32::from_rgb(255, 165, 0);
                     }
 
-                    ui.painter().circle_filled(
-                        child_pos,
-                        8.0 * zoom,
-                        if is_leaf_highlighted { egui::Color32::from_rgb(255, 165, 0) } else { egui::Color32::from_rgb(0, 200, 150) },
-                    );
+                    let mut final_leaf_pos = child_pos;
+                    if let Some(rem_res) = removal_result {
+                        if rem_res.collapsed_node_ids.contains(&id) && rem_res.removed_id != Some(leaf_id) {
+                            // Slide up animation
+                            let t = ((animation_time % 2.0) / 2.0) as f32;
+                            final_leaf_pos = pos.lerp(child_pos, t);
+                        }
+                    }
+
+                    let radius = if is_pulsing {
+                        8.0 * zoom + (animation_time.sin() * 4.0 * zoom as f64) as f32
+                    } else {
+                        8.0 * zoom
+                    };
+
+                    ui.painter().circle_filled(final_leaf_pos, radius, leaf_color);
                     
-                    if is_leaf_highlighted {
-                        ui.painter().circle_stroke(child_pos, 10.0 * zoom, egui::Stroke::new(2.5 * zoom, egui::Color32::WHITE));
+                    if is_leaf_highlighted || (search_result.as_ref().map_or(false, |r| r.leaf_id == Some(leaf_id))) {
+                        ui.painter().circle_stroke(final_leaf_pos, radius + 2.0 * zoom, egui::Stroke::new(2.5 * zoom, egui::Color32::WHITE));
                     }
 
                     ui.painter().text(
-                        child_pos + egui::vec2(0.0, 20.0 * zoom),
+                        final_leaf_pos + egui::vec2(0.0, 20.0 * zoom),
                         egui::Align2::CENTER_TOP,
                         format!("'{}'", k),
                         egui::FontId::proportional(14.0 * zoom),
                         if is_leaf_highlighted { egui::Color32::WHITE } else { egui::Color32::from_rgb(220, 220, 240) },
                     );
-
-                    // Partial Key Label
-                    ui.painter().text(
-                        child_pos + egui::vec2(0.0, 38.0 * zoom),
-                        egui::Align2::CENTER_TOP,
-                        format!("pk: {:0width$b}", entry.partial_key(), width = node.mask.len().max(1)),
-                        egui::FontId::monospace(11.0 * zoom),
-                        egui::Color32::from_rgb(0, 255, 255),
-                    );
                 }
-                Entry::Child(rep, child, _) => {
-                    // Division reason label (prominent)
-                    let text_pos = (pos + child_pos.to_vec2()) / 2.0 + egui::vec2(8.0 * zoom, -10.0 * zoom);
-                    ui.painter().text(
-                        text_pos,
-                        egui::Align2::LEFT_CENTER,
-                        format!("rep: {} | pk: {:0width$b}", rep, entry.partial_key(), width = node.mask.len().max(1)),
-                        egui::FontId::proportional(13.0 * zoom),
-                        egui::Color32::from_rgb(180, 180, 255),
-                    );
-                    Self::draw_node_recursive(highlighted_nodes, hovered_node, last_op_message, ui, &child, child_pos, zoom, false);
+                Entry::Child(_rep, child, _) => {
+                    Self::draw_node_recursive(highlighted_nodes, highlighted_edges, search_result, search_state, animation_time, removal_result, hovered_node, last_op_message, ui, &child, child_pos, zoom, false);
                 }
             }
-
             current_x += entry_width + padding;
         }
     }
@@ -401,6 +455,8 @@ impl eframe::App for HotApp {
         self.hovered_node = None;
         // --- Side Panel (Modernized Sidebar) ---
         // This panel is fixed and opaque, completely separate from the graph canvas.
+        self.handle_animations(ctx);
+
         egui::SidePanel::left("control_panel")
             .resizable(false)
             .default_width(320.0)
@@ -441,7 +497,7 @@ impl eframe::App for HotApp {
 
                     ui.add_space(15.0);
 
-                    let button_size = egui::vec2(ui.available_width() / 2.1, 42.0);
+                    let button_size = egui::vec2(ui.available_width() / 3.2, 42.0);
                     ui.horizontal(|ui| {
                         if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("➕ Insert").size(16.0)).rounding(6.0)).clicked() {
                             let old_heights = self.capture_heights();
@@ -449,20 +505,58 @@ impl eframe::App for HotApp {
                             self.trie.insert(self.new_key.clone(), val.clone());
                             self.inserted_data.insert(self.new_key.clone(), val);
                             self.update_highlights(old_heights);
+                            self.highlighted_edges.clear();
+                            self.search_result = None;
                             self.last_op_message = format!("Inserted: {}", self.new_key);
                         }
 
                         if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("🔍 Search").size(16.0)).rounding(6.0)).clicked() {
-                            let (val, path) = self.trie.lookup_with_path(&self.new_key);
+                            let res = self.trie.search(&self.new_key);
                             self.highlighted_nodes.clear();
-                            for node_id in path {
+                            self.highlighted_edges.clear();
+                            
+                            for &node_id in &res.visited_nodes {
                                 self.highlighted_nodes.insert(node_id);
                             }
+                            for &edge in &res.visited_edges {
+                                self.highlighted_edges.insert(edge);
+                            }
+                            if let Some(lid) = res.leaf_id {
+                                self.highlighted_nodes.insert(lid);
+                            }
                             
-                            if let Some(val) = val {
-                                self.last_op_message = format!("Found: {}", val);
+                            self.last_op_message = res.message.clone();
+                            self.search_state = SearchState::Finished(res.is_match);
+                            self.search_result = Some(res);
+                        }
+                        
+                        if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("🎬 Animate Search").size(16.0)).rounding(6.0)).clicked() {
+                            let res = self.trie.search(&self.new_key);
+                            self.highlighted_nodes.clear();
+                            self.highlighted_edges.clear();
+                            self.search_result = Some(res);
+                            self.search_state = SearchState::EvaluatingNode(0);
+                            self.last_step_time = ctx.input(|i| i.time);
+                            self.last_op_message = format!("Animating search for '{}'...", self.new_key);
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.add_sized(button_size, egui::Button::new(egui::RichText::new("🗑 Delete").size(16.0)).rounding(6.0)).clicked() {
+                            let res = self.trie.remove(&self.new_key);
+                            if res.success {
+                                self.inserted_data.remove(&self.new_key);
+                                self.last_op_message = res.message.clone();
+                                self.highlighted_nodes.clear();
+                                for &id in &res.collapsed_node_ids {
+                                    self.highlighted_nodes.insert(id);
+                                }
+                                self.highlighted_edges.clear();
+                                self.search_result = None;
+                                self.removal_result = Some(res);
+                                self.animation_time = ctx.input(|i| i.time);
                             } else {
-                                self.last_op_message = format!("Not found: {}", self.new_key);
+                                self.last_op_message = res.message;
                             }
                         }
                     });
@@ -477,27 +571,28 @@ impl eframe::App for HotApp {
                         ).clicked() {
                             let to_delete: Vec<u64> = self.highlighted_nodes.iter().cloned().collect();
                             let mut deleted_any = false;
+                            let mut collapsed = Vec::new();
                             for id in to_delete {
-                                if self.trie.remove_by_id(id) {
-                                    // Note: We don't easily know which key was deleted if we delete by node ID.
-                                    // For simplicity in this demo, let's just keep inserted_data as is or
-                                    // ideally we'd find all keys in that subtree and remove them.
-                                    // Since we want rebuild to work, let's just clear inserted_data for now
-                                    // if we delete subtrees, or just accept it's out of sync.
-                                    // Better: Don't allow rebuild if data is out of sync?
-                                    // Actually, let's just clear everything on delete for now to be safe.
+                                let res = self.trie.remove_by_id(id);
+                                if res.success {
                                     deleted_any = true;
+                                    collapsed.extend(res.collapsed_node_ids.clone());
+                                    self.removal_result = Some(res);
+                                    self.animation_time = ctx.input(|i| i.time);
                                 }
                             }
                             if deleted_any {
-                                // To keep it simple, if we delete a subtree, we just clear the history
-                                // because we don't know which keys were in it easily without traversing.
                                 self.inserted_data.clear(); 
                                 self.highlighted_nodes.clear();
+                                for id in collapsed {
+                                    self.highlighted_nodes.insert(id);
+                                }
                                 self.last_op_message = "Subtree(s) deleted. History cleared.".to_string();
                             } else {
                                 self.last_op_message = "Could not delete node.".to_string();
                             }
+                            self.highlighted_edges.clear();
+                            self.search_result = None;
                         }
                     }
                 });
@@ -564,6 +659,8 @@ impl eframe::App for HotApp {
                         self.zoom = 1.0;
                         self.pan = egui::Vec2::ZERO;
                         self.highlighted_nodes.clear();
+                        self.highlighted_edges.clear();
+                        self.search_result = None;
                     }
                 });
 
@@ -591,6 +688,32 @@ impl eframe::App for HotApp {
                 ui.add_space(15.0);
 
                 // --- Section 4: View Controls ---
+                if let Some(res) = &self.search_result {
+                    group_frame.show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("SEARCH STEPS").small().strong().color(egui::Color32::from_rgb(120, 255, 255)));
+                        ui.add_space(10.0);
+                        
+                        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            for (i, step) in res.steps.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{}: Node {}", i + 1, step.node_id));
+                                    ui.label(egui::RichText::new(format!("PK: 0b{:b}", step.partial_key)).monospace().color(egui::Color32::from_rgb(0, 255, 255)));
+                                });
+                                ui.label(egui::RichText::new(format!("Offset: {} | Mask: {:?}", step.byte_offset, step.mask)).small().color(egui::Color32::GRAY));
+                                if let Some(target) = step.matched_entry_id {
+                                    ui.label(egui::RichText::new(format!(" -> Matched: {}", target)).small().color(egui::Color32::GREEN));
+                                } else {
+                                    ui.label(egui::RichText::new(" -> No Match").small().color(egui::Color32::RED));
+                                }
+                                ui.separator();
+                            }
+                        });
+                    });
+                    ui.add_space(15.0);
+                }
+
+                // --- Section 4: View Controls ---
                 group_frame.show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new("VIEW CONTROLS").small().strong().color(egui::Color32::from_rgb(120, 255, 120)));
@@ -612,9 +735,11 @@ impl eframe::App for HotApp {
                 // --- Section 4: Status Area (Bottom) ---
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(20.0);
-                    let status_color = if self.last_op_message.contains("Not found") || self.last_op_message.contains("Could not") {
-                        egui::Color32::from_rgb(255, 100, 100)
-                    } else if self.last_op_message == "Ready" || self.last_op_message == "Trie Reset" {
+                    let status_color = if self.last_op_message.contains("Not found") || 
+                                          self.last_op_message.contains("False Positive") || 
+                                          self.last_op_message.contains("Could not") {
+                        egui::Color32::from_rgb(255, 80, 80) // Red
+                    } else if self.last_op_message == "Ready" || self.last_op_message == "App Reset" {
                         egui::Color32::from_rgb(150, 150, 150)
                     } else {
                         egui::Color32::from_rgb(100, 255, 200)
@@ -682,13 +807,18 @@ impl eframe::App for HotApp {
                 // Draw tree
                 Self::draw_node_recursive(
                     &mut self.highlighted_nodes,
+                    &self.highlighted_edges,
+                    &self.search_result,
+                    &self.search_state,
+                    self.animation_time,
+                    &self.removal_result,
                     &mut self.hovered_node,
                     &mut self.last_op_message,
                     ui,
                     root,
                     start_pos,
                     self.zoom,
-                    true, // This is the root
+                    true,
                 );
             } else {
                 ui.centered_and_justified(|ui| {

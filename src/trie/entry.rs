@@ -25,4 +25,12 @@ impl<K, V> Entry<K, V> {
             Entry::Child(_, _, pk) => *pk,
         }
     }
+
+    /// Sets the partial key for this entry.
+    pub fn set_partial_key(&mut self, pk: u32) {
+        match self {
+            Entry::Leaf(_, _, p) => *p = pk,
+            Entry::Child(_, _, p) => *p = pk,
+        }
+    }
 }

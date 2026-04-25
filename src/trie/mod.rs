@@ -4,4 +4,4 @@ pub mod hot;
 
 pub use entry::Entry;
 pub use node::HOTNode;
-pub use hot::{HOT, InsertResult, RemoveResult};
+pub use hot::{HOT, InsertResult, RemoveResult, SearchStep, SearchState, RemovalResult};
