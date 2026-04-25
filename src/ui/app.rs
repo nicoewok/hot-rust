@@ -426,6 +426,20 @@ impl HotApp {
                         8.0 * zoom
                     };
 
+                    // Interaction for leaf
+                    let leaf_rect = egui::Rect::from_center_size(final_leaf_pos, egui::vec2(radius * 4.0, radius * 4.0 + 20.0 * zoom));
+                    let leaf_resp = ui.interact(leaf_rect, ui.id().with(leaf_id), egui::Sense::click());
+                    if leaf_resp.clicked() {
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        if !shift { highlighted_nodes.clear(); }
+                        if highlighted_nodes.contains(&leaf_id) && shift {
+                            highlighted_nodes.remove(&leaf_id);
+                        } else {
+                            highlighted_nodes.insert(leaf_id);
+                        }
+                        *last_op_message = format!("Leaf selected: '{}' (Multi: {})", k, shift);
+                    }
+
                     ui.painter().circle_filled(final_leaf_pos, radius, leaf_color);
                     
                     if is_leaf_highlighted || (search_result.as_ref().map_or(false, |r| r.leaf_id == Some(leaf_id))) {
