@@ -568,8 +568,9 @@ impl eframe::App for HotApp {
                 .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 80, 100))) // Strong visual boundary
             )
             .show(ctx, |ui| {
-                ui.add_space(20.0);
-                ui.vertical_centered(|ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
                     ui.heading(egui::RichText::new("HOT Engine").size(24.0).strong().color(egui::Color32::WHITE));
                     ui.label(egui::RichText::new("Interactive Visualizer").italics().color(egui::Color32::from_rgb(180, 180, 200)));
                 });
@@ -878,8 +879,11 @@ impl eframe::App for HotApp {
                 });
 
                 // --- Section 4: Status Area (Bottom) ---
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("SYSTEM STATUS").small().strong().color(egui::Color32::GRAY));
                     let status_color = if self.last_op_message.contains("Not found") || 
                                           self.last_op_message.contains("False Positive") || 
                                           self.last_op_message.contains("Could not") {
@@ -891,8 +895,8 @@ impl eframe::App for HotApp {
                     };
                     
                     ui.label(egui::RichText::new(&self.last_op_message).size(16.0).color(status_color).strong());
-                    ui.label(egui::RichText::new("SYSTEM STATUS").small().strong().color(egui::Color32::GRAY));
-                    ui.separator();
+                    ui.add_space(20.0);
+                });
                 });
             });
 
